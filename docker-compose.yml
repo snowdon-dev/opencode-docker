@@ -1,0 +1,38 @@
+services:
+  opencode:
+    cpuset: "${OPENCODE_CPUSET:-2-3}"
+    #image: ghcr.io/anomalyco/opencode:1.14.47
+    image: ${OPENCODE_IMAGE_URL:-registry.lan:5000/snowdon-dev/opencode}
+    # restart: unless-stopped
+    stdin_open: true
+    tty: true
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "sleep 999999999d"
+    labels:
+      - "dev.snowdon.opencode.managed=true"
+      - "dev.snowdon.opencode.workspace=${WORKSPACE:-${pwd}}"
+    volumes:
+      - ${WORKSPACE:-.}:/workspace
+      - /etc/localtime:/etc/localtime:ro
+
+      # opencode
+      - ${OPENCODE_CACHE_DIR:-${HOME}/.cache/opencode/cache}:/home/other/.cache/opencode/cache
+      - ${OPENCODE_DATA_DIR:-${HOME}/.local/share/opencode}:/home/other/.local/share/opencode
+
+      # python
+      - ${OPENCODE_PIP_CACHE_DIR:-${HOME}/.cache/pip}:/home/other/.cache/pip
+
+      # node
+      - ${OPENCODE_NPM_CACHE_DIR:-${HOME}/.npm}:/home/other/.npm
+
+      # go
+      - ${OPENCODE_GO_BUILD_CACHE_DIR:-${HOME}/.cache/go-build}:/home/other/.cache/go-build
+      - ${OPENCODE_GO_MOD_CACHE_DIR:-${HOME}/go/pkg/mod}:/home/other/go/pkg/mod
+
+      # rust
+      - ${OPENCODE_CARGO_REGISTRY_DIR:-${HOME}/.cargo/registry}:/home/other/.cargo/registry
+      - ${OPENCODE_CARGO_GIT_DIR:-${HOME}/.cargo/git}:/home/other/.cargo/git
+      - ${OPENCODE_SCCACHE_DIR:-${HOME}/.cache/sccache}:/home/other/.cache/sccache
+    ports:
+      - "3000:3000"

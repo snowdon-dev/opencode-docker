@@ -1,0 +1,176 @@
+name: opencode
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  opencode:
+    if: |
+      contains(github.event.comment.body, '/oc') ||
+      contains(github.event.comment.body, '/opencode')
+    runs-on: ubuntu-local-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository main branch for issues
+        # Use .html_url to ensure it's a real PR and not an empty object
+        if: ${{ !github.event.issue.pull_request }}
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          #persist-credentials: false
+
+      - name: Checkout repository pr branch for pull requests
+        uses: actions/checkout@v4
+        # Use .html_url to ensure it's a real PR and not an empty object
+        if: ${{ github.event.issue.pull_request.html_url != '' && github.event.issue.pull_request != null }}
+        with:
+          ref: refs/pull/${{ github.event.issue.number }}/head
+          fetch-depth: 0
+          #persist-credentials: false
+
+      - name: Fetch base branch for pull requests
+        if: ${{ github.event.issue.pull_request.html_url != '' && github.event.issue.pull_request != null }}
+        run: git fetch origin ${{ github.event.repository.default_branch }}
+        #env:
+        # This tells git to use the token for this specific run step
+        #GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+        # for pr, use the built in
+      - name: PR Code Review
+        # Only runs if IS_PR was true in the prep step
+        if: steps.prep.outputs.is_pr == 'true'
+        #uses: docker://ghcr.io/ccsert/opencode-review:latest
+        uses: docker://registry.lan:5000/ccsert/opencode-review:rbp4
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          GITEA_SERVER_URL: ${{ github.server_url }}
+          MODEL: "opencode/minimax-m2.5-free" # Or your preferred model
+          PR_NUMBER: ${{ github.event.issue.number }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        with:
+          args: review
+
+      # if a issue comment we first get a summery of the issue and its comments
+      - name: Cache tea binary
+        id: cache-tea
+        if: steps.prep.outputs.is_pr != 'true'
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/tea
+          key: ${{ runner.os }}-tea-cli-0.12.0
+          restore-keys: |
+            ${{ runner.os }}-tea-cli-
+
+      - name: Install tea CLI (if not cached)
+        if: steps.cache-tea.outputs.cache-hit != 'true' && steps.prep.outputs.is_pr != 'true'
+        run: |
+          curl -sL https://dl.gitea.com/tea/0.12.0/tea-0.12.0-linux-arm64 -o tea
+          chmod +x tea
+          sudo mv tea /usr/local/bin/tea
+
+      - name: Configure Gitea login
+        if: steps.prep.outputs.is_pr != 'true'
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          GITEA_SERVER_URL: ${{ gitea.server_url }}
+        run: |
+          tea login add \
+            --name gitea_runner \
+            --url "$GITEA_SERVER_URL" \
+            --token "$GITEA_TOKEN" \
+            --no-version-check
+
+      - name: Run opencode
+        id: prep
+        if: steps.prep.outputs.is_pr != 'true'
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          GITEA_SERVER_URL: ${{ gitea.server_url }}
+          OPENCODE_LOG_LEVEL: debug
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          IS_PR: ${{ github.event.issue.pull_request.html_url != '' && github.event.issue.pull_request != null }}
+          NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+        run: |
+
+          echo "is_pr=$IS_PR" >> $GITHUB_OUTPUT
+
+          # Fetch title and body of the thread (Issue or PR)
+          THREAD_TITLE="${{ github.event.issue.title || github.event.pull_request.title }}"
+          THREAD_BODY="${{ github.event.issue.body || github.event.pull_request.body }}"
+          COMMENT_BODY="${{ github.event.comment.body }}"
+
+          if [ "$IS_PR" = "true" ]; then
+            CONTEXT_TYPE="Pull Request"
+            # Get the diff stat relative to main branch
+            DIFF_STAT=$(git diff --stat origin/${{ github.event.repository.default_branch }}..HEAD);
+            TASKS="Analyze the changes and provide line-level feedback."
+          else
+            
+            ISSUE_COMMENTS="$(tea issue ${NUMBER} --comments --output json | jq -r '.comments[] | "- \(.author): \(.body)"')"
+
+            CONTEXT_TYPE="Issue"
+            DIFF_STAT="This is a standard issue, however the issue may reference pull requets that are intresting. You would need to find and request information on these. The issue comments are as follows:\n\n ${ISSUE_COMMENTS}"
+            TASKS="Provide technical suggestions or an architectural plan based on the description and comments."
+          fi
+
+          MESSAGE="You are acting on ${CONTEXT_TYPE} #${NUMBER} in ${REPO_OWNER}/${REPO_NAME}.
+
+            TITLE: ${THREAD_TITLE}
+            DESCRIPTION: ${THREAD_BODY}
+            LATEST COMMENT: ${COMMENT_BODY}
+
+            DIFF STATS:
+            ${DIFF_STAT}
+
+            TASK:
+            Be mindful that you are focused on a single task. Try to NOT go out of the bounds of analysing the code and ramifications of this ${CONTEXT_TYPE}.
+            ${TASKS}
+
+            You are running within a self hosted Gitea runner, inside a docker container.
+            Gitea is a self-hosted GIT server.\
+            Gitea runner's function exactly the same as GitHub runners. They're just stored in the .gitea folder instead of .github folder. Or if there's is only a .github folder, it just uses that."
+
+          echo "$MESSAGE"
+
+          #echo "message<<EOF" >> $GITHUB_OUTPUT
+          #echo "$MESSAGE" >> $GITHUB_OUTPUT
+          #echo "EOF" >> $GITHUB_OUTPUT
+          echo "$MESSAGE" > prompt-message.txt
+
+          # Using single quotes for the shell command, 
+          # and double quotes ONLY for the variable reference.
+      - name: Issue Analysis
+        if: steps.prep.outputs.is_pr != 'true'
+        #uses: docker://registry.lan:5000/ccsert/opencode-review:rbp4
+        uses: docker://registry.lan:5000/ccsert/opencode-review:rbp4-extra
+        env:
+          MODEL: "opencode/minimax-m2.5-free" # Or your preferred model
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          GITEA_SERVER_URL: ${{ github.server_url }}
+          OPENAI_API_KEY: fail
+          # The engine injects the raw string here safely
+          RAW_MESSAGE: ${{ steps.prep.outputs.message }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        with:
+          entrypoint: opencode
+          args: run --agent gitea-assistant -f prompt-message.txt --message "Analyze the issue."
+          #args: run --agent code-reviewer -f prompt-message.txt --message "prompt-message.txt"
+          #args: -c 'opencode run --agent code-reviewer -f prompt-message.txt --message "prompt-message.txt"'
+          #args: -c 'opencode run --config opencode.json --agent code-reviewer "$(cat prompt-message.txt)"'
+          #args: >
+          #  -c "printf '%s' \"$RAW_MESSAGE\" | opencode run --config opencode.json --agent code-reviewer"
+          #args: >
+          #  -c 'opencode run --config opencode.json --agent code-reviewer "$RAW_MESSAGE"'
+          #args: >
+          #  -c 'echo "My message is: $RAW_MESSAGE"'

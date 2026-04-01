@@ -1,0 +1,32 @@
+name: deploy opencode
+run-name: opencode deploy ${{ gitea.actor }}
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+      - 'opencode.json'
+      - '.gitea/**'
+
+jobs:
+  build:
+    runs-on: ubuntu-local-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build with Kaniko
+        uses: docker://registry.lan:5000/kaniko-project/executor:debug
+        with:
+          args: >-
+            --context=${{ github.workspace }}
+            --dockerfile=${{ github.workspace }}/opencode/Dockerfile
+            --destination=registry.lan:5000/snowdon-dev/opencode
+            --insecure
+            --insecure-pull
+            --insecure-registry=registry.lan:5000
+            --skip-tls-verify
+            --cache=true

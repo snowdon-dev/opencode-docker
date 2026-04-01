@@ -1,0 +1,31 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama (local)",
+      "options": {
+        "base_url": "http://ollama:11434/v1",
+	"baseURL": "http://ollama:11434/v1",
+	"apiKey": "ollama"
+       },
+       "models": {
+         "granite4:350m-h": {
+           "name": "Granite 4 350M",
+           "modelName": "granite4:350m-h"
+         },
+	 "tinyllama": {
+           "name": "tinyllama",
+           "modelName": "tinyllama"
+         },
+	 "qwen3:0.6b": {
+           "name": "qwen3:0.6b",
+           "modelName": "qwen3:0.6b"
+         }
+       }
+    }
+  },
+  "theme": "opencode",
+  "model": "ollama/qwen3:0.6b",
+  "plugin": ["opencode-gemini-auth@latest"]
+}

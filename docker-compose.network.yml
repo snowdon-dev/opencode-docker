@@ -1,0 +1,9 @@
+services:
+  opencode:
+    networks:
+      - extra-network
+
+networks:
+  extra-network:
+    external: true
+    name: ${OPENCODE_NETWORK}

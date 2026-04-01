@@ -1,0 +1,12 @@
+alias opencode:update='( cd $SD_OPENCODE && docker compose pull )'
+alias opencode='$SD_OPENCODE/scripts/launcher.sh start'
+alias opencode:stop='$SD_OPENCODE/scripts/launcher.sh stop'
+alias opencode:exec='$SD_OPENCODE/scripts/launcher.sh exec'
+alias opencode:compose='$SD_OPENCODE/scripts/launcher.sh compose'
+alias opencode:scaffold='$SD_OPENCODE/scripts/launcher.sh scaffold'
+alias oc='opencode'
+alias oc:s='opencode:stop';
+alias oc:u='opencode:update';
+alias oc:e='opencode:exec';
+alias oc:c='opencode:compose';
+alias oc:sf='opencode:scaffold';
