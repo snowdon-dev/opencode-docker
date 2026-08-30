@@ -34,7 +34,7 @@ opencode:scaffold gists/html-hello "$(cat /tmp/sometask.md)"
 - [x] [ohmyzsh](https://github.com/ohmyzsh/ohmyzsh/wiki/Customization) plugin abillity
 - [x] Security: configure project isolated cache storage via environment variables
 - [ ] Security: Add project specific OPENCODE_DATA_DIR
-- [ ] [Add github build - docker step by step guide](https://docs.docker.com/guides/gha/)
+- [x] [Add github build - docker step by step guide](https://docs.docker.com/guides/gha/)
 - [ ] Build containers full(rust, go, c, node, python) - duck(node, python) - empty.
 - [ ] In the docker compose, use build . and add a docker that uses FROM image-full
 - [ ] Fix: Allow multiple port bindings to enable multiple running agents on mulitple projects
@@ -93,10 +93,9 @@ running `alias | grep oc:` or `alias | grep opencode:`.
 
 ## Environment setup steps
 
-- An environment variable for SD_OPENCODE should be set to tell the progream
+- An environment variable for SD_OPENCODE should be set to tell the program
   the location of the repo
-- If not other wise spesified in the environment the default will only use 2
-  cpus.
+- If not otherwise specified the environment default will only use 2 cpus.
 
 ## Environment variables
 
