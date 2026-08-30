@@ -287,7 +287,7 @@ opencode:scaffold() {
     # overhead and could eliminate a dependency on shell environment within the
     # container.
     local tmp_context="<task-information>
-The curent project information.
+You are creating the inital project scaffold. The inital project information is as follows.
 You have access to the CPUSET: $cpus
 Project name: $proj
 Working directory: /workspace

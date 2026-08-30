@@ -1,7 +1,7 @@
 # opencode dev container
 
 [![Docker Pulls](https://img.shields.io/docker/pulls/devsnowdon/opencode-docker)](https://hub.docker.com/r/devsnowdon/opencode-docker)
-[![Docker Image Version](https://img.shields.io/docker/v/USERNAME/IMAGE?sort=semver)](https://hub.docker.com/r/devsnowdon/opencode-docker)
+[![Docker Image Version](https://img.shields.io/docker/v/devsnowdon/opencode-docker?sort=semver)](https://hub.docker.com/r/devsnowdon/opencode-docker)
 [![Docker Image Size](https://img.shields.io/docker/image-size/devsnowdon/opencode-docker)](https://hub.docker.com/r/devsnowdon/opencode-docker)
 [![.github/workflows/build-push.yaml](https://github.com/snowdon-dev/opencode-docker/actions/workflows/build-push.yaml/badge.svg)](https://github.com/snowdon-dev/opencode-docker/actions/workflows/build-push.yaml)
 
