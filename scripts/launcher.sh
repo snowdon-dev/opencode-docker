@@ -426,8 +426,11 @@ main() {
     echo "command not implemented"
     ;;
   clone)
-    # TODO: take a git repository and clone it into a location
-    # clone --check runs security
+    # TODO: Implement commadn to retrieve a git repository and clone it into a location
+    # clone --check runs security, then perform come action or check if it already exists
+    # and preform some action
+    echo "command not implemented"
+    ;;
   *)
     echo "Unknown command: $cmd" >&2
     echo "Usage: $0 [stop | start] [args...]" >&2

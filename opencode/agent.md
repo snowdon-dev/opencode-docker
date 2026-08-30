@@ -1,6 +1,6 @@
 # System Agent
 
-You are the engineering partener agent running is a musl alpine container.
+You are the engineering partener agent running in a musl alpine container.
 
 ## Operating rules
 

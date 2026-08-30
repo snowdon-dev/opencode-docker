@@ -1,6 +1,34 @@
 # opencode dev container
 
-- [x] [Docker](https://www.docker.com/for ) base container for opencode work
+Runs [opencode](https://opencode.ai) in a Docker container with the current
+project bind-mounted at `/workspace`, plus persistent caches for the language
+toolchains installed in the image (Go, Rust, Node, Python).
+
+This project has been desgined for arm archetecture devices like the [Raspberry
+Pi](https://www.raspberrypi.com/). However, it should be compatible with x86.
+
+Open opencode on the current project
+
+```shell
+opencode
+opencode:exec
+opencode:stop
+opencode:compose
+opencode:scaffold
+opencode:help
+
+opencode /home/other/somerepo
+
+opencode:exec /home/other/somerepo sh
+
+opencode:scaffold somefolder "Create basic hello world html project"
+opencode:scaffold /home/pi/project-1 "Create basic hello world html project"
+opencode:scaffold gists/html-hello "Create basic hello world html project"
+opencode:scaffold gists/html-hello "$(cat /tmp/sometask.md)"
+```
+
+
+- [x] [Docker](https://www.docker.com/) base container for opencode work
 - [x] Convenience launcher script
 - [x] Security: prevent potential destructive actions by the agent
 - [x] [ohmyzsh](https://github.com/ohmyzsh/ohmyzsh/wiki/Customization) plugin abillity
@@ -14,36 +42,12 @@
 - [ ] Image extensions - use environment variable to extend from the base - or [development containers spec](https://containers.dev/implementors/spec/)
 - [ ] Project creation with scaffold extra context
 
-Runs [opencode](https://opencode.ai) in a Docker container with the current
-project bind-mounted at `/workspace`, plus persistent caches for the language
-toolchains installed in the image (Go, Rust, Node, Python).
-
-Open opencode on the current project
-
-```shell
-opencode
-opencode:exec
-opencode:stop
-opencode:compose
-opencode:scaffold
-
-opencode /home/other/somerepo
-
-opencode:exec /home/other/somerepo
-
-opencode:scaffold somefolder "Create basic hello world html project"
-opencode:scaffold /home/pi/project-1 "Create basic hello world html project"
-opencode:scaffold gists/html-hello "Create basic hello world html project"
-
-#...
-```
-
 ## Install
 
 Clone the repository to `~/opencode`:
 
 ```sh
-git clone <repo-url> ~/opencode
+git clone https://github.com/snowdon-dev/opencode-docker.git ~/opencode
 ```
 
 `scripts/launcher.sh` looks for the compose files in `~/opencode`, so link the
@@ -54,6 +58,8 @@ plain `docker compose` runs and the launcher. See [Environment
 variables](#environment-variables).
 
 ## Container Usage
+
+You should use the opencode launcher utility to launch the container. As it needs environment variables to (like WORKSPACE) init properly. See oh-my-zsh plugin.
 
 ```sh
 docker compose up -d opencode
@@ -137,11 +143,9 @@ If you use `scripts/launcher.sh`, put the `.env` file next to your compose
 files (by default `~/opencode/.env`), since that is the project directory
 docker compose reads from — or simply export the variables in your shell rc.
 
-### Reproducing the previous hardcoded configuration
+### Env file example
 
-Before this change, `docker-compose.yml` pointed at fixed paths under
-`/mnt/usb2/storage/opencode/cache` and `/opt/opencode-data`. To keep using
-those locations, create a `.env` next to `docker-compose.yml` with:
+Add a file like the following to `~/opencode/.env`.
 
 ```sh
 OPENCODE_CACHE_DIR=/mnt/usb2/storage/opencode/cache/opencode/opencode/cache

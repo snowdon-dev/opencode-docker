@@ -12,8 +12,8 @@ on:
           - 'true'
           - 'false'
   push:
-    branches:
-      - main
+#    branches:
+#      - main
     tags:
       - 'v*'
     paths-ignore:
@@ -42,7 +42,7 @@ jobs:
         id: image
         env:
           DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
-        run: echo "image=${DOCKERHUB_IMAGE:-anomalyco/opencode}" >> "$GITHUB_OUTPUT"
+        run: echo "image=${DOCKERHUB_IMAGE:-devsnowdon/opencode-docker}" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -75,7 +75,7 @@ jobs:
           context: .
           file: opencode/Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: false
+          push: true
           tags: ${{ steps.tags.outputs.tags }}
           build-args: |
             INSTALL_RUST=${{ inputs.rust || 'true' }}
