@@ -32,6 +32,7 @@ _opencode_args_prepare() {
   # Add network configuration if OPENCODE_NETWORK environment variable is set
   if [[ -n "${OPENCODE_NETWORK:-}" ]]; then
     args_out+=(-f "$compose_dir/docker-compose.network.yml")
+    echo "Using network: $OPENCODE_NETWORK"
   fi
 
   # TODO: Add a merge point for a user defined config
@@ -58,7 +59,7 @@ _opencode_args_prepare() {
           printf '%s\n' '    volumes:'
 
           for git_dir in "${git_dirs[@]}"; do
-            rel="${git_dir#"$ws_out"/}"
+            rel="${git_dir#$ws_out/}"
 
             printf '      - %s:/workspace/%s:ro\n' \
                 "$git_dir" \
@@ -92,26 +93,19 @@ _opencode_prepare() {
 
   # Set up compose directory and project name
   local compose_dir="${SD_OPENCODE:-$HOME/opencode}"
-  proj_out="$(basename "$ws_out")"  
+  proj_out="$(basename "$ws_out")"
 }
 
 # Main function to start and run opencode in a Docker container
 # This function creates and executes the opencode container with proper
 # workspace configuration and environment isolation.
 opencode() {
-  local target_dir="$1"
-  shift
+  local ws="$1"
+  local proj="$2"
+  shift 2
 
-  # Initialize local variables for function scope
-  local ws proj
   local -a args=()
-  _opencode_prepare "$target_dir" ws proj || return 1
   _opencode_args_prepare "$ws" "$proj" args || return 1
-
-  # Display configuration information
-  echo "Using opencode workspace: $ws"
-  echo "Compose project: $proj"
-  [[ -n "${OPENCODE_NETWORK:-}" ]] && echo "Using network: $OPENCODE_NETWORK"
 
   # Execute Docker commands in a subshell to isolate environment variables
   (
@@ -119,7 +113,6 @@ opencode() {
 
     # Export environment variables for Docker Compose
     export WORKSPACE="$ws"
-    [[ -n "${OPENCODE_NETWORK:-}" ]] && export OPENCODE_NETWORK="$OPENCODE_NETWORK"
 
     # Start the opencode container and execute the command
     docker compose "${args[@]}" up -d opencode
@@ -149,11 +142,11 @@ opencode() {
 # This function runs interactive commands within a running container
 # without creating a new container instance.
 opencode:exec() {
-  local target_dir="$1"
-  shift
-  local ws proj 
+  local ws="$1"
+  local proj="$2"
+  shift 2
+
   local -a args
-  _opencode_prepare "$target_dir" ws proj || return 1
   _opencode_args_prepare "$ws" "$proj" args || return 1
 
   echo "Executing in opencode project: $proj ($ws)"
@@ -162,7 +155,6 @@ opencode:exec() {
     cd "$ws" || exit 1
 
     export WORKSPACE="$ws"
-    [[ -n "${OPENCODE_NETWORK:-}" ]] && export OPENCODE_NETWORK="$OPENCODE_NETWORK"
 
     # TODO: Ensure container is running before executing commands
     # If the container is not started, automatically start it first.
@@ -178,11 +170,11 @@ opencode:exec() {
 # This function provides direct access to Docker Compose functionality
 # for advanced container management operations.
 opencode:compose() {
-  local target_dir="$1"
-  shift
-  local ws proj 
+  local ws="$1"
+  local proj="$2"
+  shift 2
+
   local -a args
-  _opencode_prepare ws proj || return 1
   _opencode_args_prepare "$ws" "$proj" args || return 1
 
   echo "Running Docker Compose for project: $proj ($ws)"
@@ -191,7 +183,6 @@ opencode:compose() {
     cd "$ws" || exit 1
 
     export WORKSPACE="$ws"
-    [[ -n "${OPENCODE_NETWORK:-}" ]] && export OPENCODE_NETWORK="$OPENCODE_NETWORK"
 
     # Pass all arguments directly to Docker Compose
     docker compose "${args[@]}" "$@"
@@ -202,12 +193,12 @@ opencode:compose() {
 # This function gracefully shuts down the container and cleans up resources
 # while preserving the workspace configuration.
 opencode:stop() {
-  local target_dir="$1"
-  shift
-  local ws proj
+  local ws="$1"
+  local proj="$2"
+  shift 2
+
   local -a args
-  _opencode_prepare "$target_dir" ws proj || return 1
-  _opencode_args_prepare "$target_dir" "$ws" "$proj" || return 1
+  _opencode_args_prepare "$ws" "$proj" args || return 1
 
   echo "Stopping opencode project: $proj ($ws)"
 
@@ -215,7 +206,6 @@ opencode:stop() {
     cd "$ws" || exit 1
 
     export WORKSPACE="$ws"
-    [[ -n "${OPENCODE_NETWORK:-}" ]] && export OPENCODE_NETWORK="$OPENCODE_NETWORK";
 
     # Stop and remove containers, networks, and volumes
     docker compose "${args[@]}" down
@@ -257,9 +247,6 @@ $(git log --stat | cat)
 # This function sets up a new project workspace with proper configuration
 # and launches the opencode runner to begin development.
 opencode:scaffold() {
-  local target_dir="$1"
-  shift
-
   # Initialize project variables and prepare environment
   # NOTE: Project name is derived from basename only, which may cause naming
   # conflicts when different directories share the same final component.
@@ -267,8 +254,9 @@ opencode:scaffold() {
   # both become project name "one". A future improvement should use a sanitized
   # version of the full relative path to ensure uniqueness while maintaining
   # Docker Compose naming compatibility (lowercase, hyphens only).
-  local ws proj 
-  _opencode_prepare "$target_dir" ws proj || return 1
+  local ws="$1"
+  local proj="$2"
+  shift 2
 
   echo "Running on opencode project: $proj ($ws)"
   
@@ -309,7 +297,6 @@ Your task is as follows:
 
     # Configure and launch the opencode runner in Docker
     export WORKSPACE="$ws"
-    [[ -n "${OPENCODE_NETWORK:-}" ]] && export OPENCODE_NETWORK="$OPENCODE_NETWORK";
 
     # TODO: Implement custom agent and model configuration
     # Allow users to specify custom agent definitions and model settings
@@ -317,7 +304,7 @@ Your task is as follows:
 
     # Execute opencode with context information
     docker compose "${args[@]}" run --rm opencode \
-      'exec opencode run "$@"' opencode "$tmp_context" "$@"
+      'exec opencode run "$@"' opencode --auto "$tmp_context" "$@"
   )
 }
 
@@ -343,7 +330,7 @@ main() {
     else
       # Process the provided project name
       local name=$1
-      local repo_home=="$(SD_REPO_HOME:-/home/$USER/repos/$name)"
+      local repo_home="${SD_REPO_HOME:-/home/$USER/repos/$name}"
       local tmp_ws_out="$repo_home"
 
       if [[ -d "$name" ]]; then
@@ -389,27 +376,37 @@ main() {
   else
     ws_out="$(pwd)"
   fi
+
+  local ws="$ws_out"
+
+  # Set up compose directory and project name
+  local compose_dir="${SD_OPENCODE:-$HOME/opencode}"
+  local proj="$(basename "$ws")"  
+
+  # Display configuration information
+  echo "Using opencode workspace: $ws"
+  echo "Compose project: $proj"
   
   # Dispatch to the appropriate command handler
   case "$cmd" in
   stop)
-    opencode:stop "$ws_out" "$@"
+    opencode:stop "$ws" "$proj" "$@"
     ;;
   start)
-    opencode "$ws_out" "$@"
+    opencode "$ws" "$proj" "$@"
     ;;
   exec)
-    opencode:exec "$ws_out" "$@"
+    opencode:exec "$ws" "$proj" "$@"
     ;;
   compose)
-    opencode:compose "$ws_out" "$@"
+    opencode:compose "$ws" "$proj" "$@"
     ;;
   up)
     echo "up command not implemented"
     # TODO: Implement command to start containers without running processes
     ;;
   scaffold)
-    opencode:scaffold "$ws_out" "$@"
+    opencode:scaffold "$ws" "$proj" "$@"
     ;;
   setup)
     # TODO: Implement command to run on existing persisted instance
