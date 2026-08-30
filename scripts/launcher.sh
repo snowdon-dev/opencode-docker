@@ -15,6 +15,8 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# Prepares the Docker Compose arguments. This function sets up the project
+# configuration including network settings and git directory mounts.
 _opencode_args_prepare() {
   local ws_out="$1"
   local proj_out="$2"
@@ -73,9 +75,7 @@ _opencode_args_prepare() {
   fi
 }
 
-# Prepares the opencode environment by resolving workspace paths and building
-# Docker Compose arguments. This function sets up the project configuration
-# including network settings and git directory mounts.
+# Prepares the opencode environment by resolving workspace paths.
 _opencode_prepare() {
   # Use the provided target directory, falling back to current directory
   local target="${1:-.}"

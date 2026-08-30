@@ -1,5 +1,10 @@
 # opencode dev container
 
+[![Docker Pulls](https://img.shields.io/docker/pulls/devsnowdon/opencode-docker)](https://hub.docker.com/r/devsnowdon/opencode-docker)
+[![Docker Image Version](https://img.shields.io/docker/v/USERNAME/IMAGE?sort=semver)](https://hub.docker.com/r/devsnowdon/opencode-docker)
+[![Docker Image Size](https://img.shields.io/docker/image-size/devsnowdon/opencode-docker)](https://hub.docker.com/r/devsnowdon/opencode-docker)
+[![.github/workflows/build-push.yaml](https://github.com/snowdon-dev/opencode-docker/actions/workflows/build-push.yaml/badge.svg)](https://github.com/snowdon-dev/opencode-docker/actions/workflows/build-push.yaml)
+
 Runs [opencode](https://opencode.ai) in a Docker container with the current
 project bind-mounted at `/workspace`, plus persistent caches for the language
 toolchains installed in the image (Go, Rust, Node, Python).
@@ -74,7 +79,7 @@ custom plugin:
 
 ```sh
 mkdir -p "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/opencode"
-ln -s ~/repos/dotfiles/omz/opencode.zsh \
+ln -s ~/opencode/omz/opencode.zsh \
   "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/opencode/opencode.plugin.zsh"
 ```
 
@@ -88,7 +93,7 @@ plugins=(... opencode)
 ```
 
 After restarting your shell (`exec zsh`). View the avaliable commands by
-running `alias | grep oc:` or `alias | grep opencode:`.
+running `alias | grep oc` or `alias | grep opencode`.
 
 ## Environment setup steps
 
@@ -96,7 +101,7 @@ running `alias | grep oc:` or `alias | grep opencode:`.
   the location of the repo
 - If not otherwise specified the environment default will only use 2 cpus.
 - An environment `SD_REPO_HOME` variable sets the root location used when
-  building non-absolute paths the in scaffold command.
+  building non-absolute paths in the scaffold command.
 
 ## Environment variables
 
