@@ -15,28 +15,12 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# Prepares the opencode environment by resolving workspace paths and building
-# Docker Compose arguments. This function sets up the project configuration
-# including network settings and git directory mounts.
-_opencode_prepare() {
-  # Use the provided target directory, falling back to current directory
-  local target="${1:-.}"
+_opencode_args_prepare() {
+  local ws_out="$1"
+  local proj_out="$2"
+  local -n args_out="$3"
 
-  # Reference parameters for output values
-  local -n ws_out="$2"
-  local -n proj_out="$3"
-  local -n args_out="$4"
-
-  # Resolve the absolute path of the workspace directory
-  if ! ws_out="$(cd "$target" 2>/dev/null && pwd)"; then
-    echo "Error: Workspace directory '$target' does not exist." >&2
-    return 1
-  fi
-
-  # Set up compose directory and project name
   local compose_dir="${SD_OPENCODE:-$HOME/opencode}"
-  proj_out="$(basename "$ws_out")"
-  
   # Build Docker Compose arguments starting with the main compose file
   args_out=(
     -p "$proj_out"
@@ -89,6 +73,28 @@ _opencode_prepare() {
   fi
 }
 
+# Prepares the opencode environment by resolving workspace paths and building
+# Docker Compose arguments. This function sets up the project configuration
+# including network settings and git directory mounts.
+_opencode_prepare() {
+  # Use the provided target directory, falling back to current directory
+  local target="${1:-.}"
+
+  # Reference parameters for output values
+  local -n ws_out="$2"
+  local -n proj_out="$3"
+
+  # Resolve the absolute path of the workspace directory
+  if ! ws_out="$(cd "$target" 2>/dev/null && pwd)"; then
+    echo "Error: Workspace directory '$target' does not exist." >&2
+    return 1
+  fi
+
+  # Set up compose directory and project name
+  local compose_dir="${SD_OPENCODE:-$HOME/opencode}"
+  proj_out="$(basename "$ws_out")"  
+}
+
 # Main function to start and run opencode in a Docker container
 # This function creates and executes the opencode container with proper
 # workspace configuration and environment isolation.
@@ -99,7 +105,8 @@ opencode() {
   # Initialize local variables for function scope
   local ws proj
   local -a args=()
-  _opencode_prepare "$target_dir" ws proj args || return 1
+  _opencode_prepare "$target_dir" ws proj || return 1
+  _opencode_args_prepare "$ws" "$proj" args || return 1
 
   # Display configuration information
   echo "Using opencode workspace: $ws"
@@ -117,7 +124,7 @@ opencode() {
     # Start the opencode container and execute the command
     docker compose "${args[@]}" up -d opencode
     docker compose "${args[@]}" exec -w /workspace opencode opencode "$@"
-    
+
     # TODO: Implement container conflict detection
     # If port bindings do not allow multiple running containers, filter by label
     # dev.snowdon.opencode.managed to detect existing instances. If found, retrieve
@@ -126,7 +133,7 @@ opencode() {
     # Example message: "Container already running for workspace /path/to/workspace.
     # Run 'opencode:stop /path/to/workspace' first, or use 'opencode:new' to
     # automatically remove the existing container."
-    
+
     # Verify container status after execution
     container_id="$(docker compose "${args[@]}" ps -q -a opencode)"
     if [[ -z "$container_id" ]]; then
@@ -146,7 +153,8 @@ opencode:exec() {
   shift
   local ws proj 
   local -a args
-  _opencode_prepare "$target_dir" ws proj args || return 1
+  _opencode_prepare "$target_dir" ws proj || return 1
+  _opencode_args_prepare "$ws" "$proj" args || return 1
 
   echo "Executing in opencode project: $proj ($ws)"
 
@@ -155,12 +163,12 @@ opencode:exec() {
 
     export WORKSPACE="$ws"
     [[ -n "${OPENCODE_NETWORK:-}" ]] && export OPENCODE_NETWORK="$OPENCODE_NETWORK"
-    
+
     # TODO: Ensure container is running before executing commands
     # If the container is not started, automatically start it first.
     # This may require using 'docker compose up -d' with --force-recreate
     # to handle cases where the container was stopped or crashed.
-    
+
     # Execute command interactively in the running container
     docker compose "${args[@]}" exec -it opencode "$@"
   )
@@ -174,7 +182,8 @@ opencode:compose() {
   shift
   local ws proj 
   local -a args
-  _opencode_prepare "$target_dir" ws proj args || return 1
+  _opencode_prepare ws proj || return 1
+  _opencode_args_prepare "$ws" "$proj" args || return 1
 
   echo "Running Docker Compose for project: $proj ($ws)"
 
@@ -197,7 +206,8 @@ opencode:stop() {
   shift
   local ws proj
   local -a args
-  _opencode_prepare "$target_dir" ws proj args || return 1
+  _opencode_prepare "$target_dir" ws proj || return 1
+  _opencode_args_prepare "$target_dir" "$ws" "$proj" || return 1
 
   echo "Stopping opencode project: $proj ($ws)"
 
@@ -258,8 +268,7 @@ opencode:scaffold() {
   # version of the full relative path to ensure uniqueness while maintaining
   # Docker Compose naming compatibility (lowercase, hyphens only).
   local ws proj 
-  local -a args
-  _opencode_prepare "$target_dir" ws proj args || return 1
+  _opencode_prepare "$target_dir" ws proj || return 1
 
   echo "Running on opencode project: $proj ($ws)"
   
@@ -267,10 +276,13 @@ opencode:scaffold() {
   local cpus="${OPENCODE_CPUSET:-2-3}"
   (
     cd "$ws" || exit 1
-    
+
     # Initialize git repository in the workspace
     setup_git_dir "$proj"
 
+    local -a args
+    _opencode_args_prepare "$ws" "$proj" args || return 1
+  
     # Build context information for the opencode runner. Reduces execution
     # overhead and could eliminate a dependency on shell environment within the
     # container.
@@ -278,8 +290,8 @@ opencode:scaffold() {
 The curent project information.
 You have access to the CPUSET: $cpus
 Project name: $proj
-Working directory: $(pwd)
-Workspace contents of $(pwd):
+Working directory: /workspace
+Workspace contents of /workspace:
 \`\`\`
 $(ls -la $ws)
 \`\`\`
@@ -298,11 +310,11 @@ Your task is as follows:
     # Configure and launch the opencode runner in Docker
     export WORKSPACE="$ws"
     [[ -n "${OPENCODE_NETWORK:-}" ]] && export OPENCODE_NETWORK="$OPENCODE_NETWORK";
-    
+
     # TODO: Implement custom agent and model configuration
     # Allow users to specify custom agent definitions and model settings
     # for scaffold operations via environment variables or configuration files.
-    
+
     # Execute opencode with context information
     docker compose "${args[@]}" run --rm opencode \
       'exec opencode run "$@"' opencode "$tmp_context" "$@"
@@ -315,7 +327,7 @@ Your task is as follows:
 main() {
   local cmd="${1:-}"
   shift || true
-  
+
   # Get the workspace directory from arguments or current directory
   local ws_out="${1:-$(pwd)}"
 
@@ -331,8 +343,9 @@ main() {
     else
       # Process the provided project name
       local name=$1
-      local tmp_ws_out="/home/$USER/repos/$name"
-      
+      local repo_home=="$(SD_REPO_HOME:-/home/$USER/repos/$name)"
+      local tmp_ws_out="$repo_home"
+
       if [[ -d "$name" ]]; then
           # Check if the directory is empty
           if [[ -n $(find "$name" -mindepth 1 -print -quit) ]]; then
@@ -341,25 +354,25 @@ main() {
           else
               echo "Using existing empty directory: $name"
           fi
-      
+
           # Convert relative path to absolute path
           ws_out=$(realpath -- "$name")
-      
+
       elif [[ -e "$name" || -L "$name" ]]; then
           # Handle case where path exists but is not a directory
           echo "Path already exists but is not a directory: $name" >&2
           exit 1
-      
+
       elif [[ -d "$tmp_ws_out" ]]; then
           # Check if temporary workspace directory is empty
           if [[ -n $(find "$tmp_ws_out" -mindepth 1 -print -quit) ]]; then
               echo "$tmp_ws_out is not empty; scaffold failed" >&2
               exit 1
           fi
-      
+
           echo "Using existing empty directory: $tmp_ws_out"
           ws_out=$(realpath -- "$tmp_ws_out")
-      
+
       else
           # Create new directory for the project
           echo "Creating $tmp_ws_out"

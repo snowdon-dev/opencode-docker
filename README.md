@@ -7,8 +7,6 @@ toolchains installed in the image (Go, Rust, Node, Python).
 This project has been desgined for arm archetecture devices like the [Raspberry
 Pi](https://www.raspberrypi.com/). However, it should be compatible with x86.
 
-Open opencode on the current project
-
 ```shell
 opencode
 opencode:exec
@@ -46,7 +44,7 @@ opencode:scaffold gists/html-hello "$(cat /tmp/sometask.md)"
 
 Clone the repository to `~/opencode`:
 
-```sh
+```shell
 git clone https://github.com/snowdon-dev/opencode-docker.git ~/opencode
 ```
 
@@ -85,6 +83,7 @@ Then enable it in `~/.zshrc` and point `$SD_OPENCODE` at the repository
 
 ```sh
 export SD_OPENCODE="$HOME/opencode"
+export SD_REPO_HOME="$HOME/repos"
 plugins=(... opencode)
 ```
 
@@ -93,9 +92,11 @@ running `alias | grep oc:` or `alias | grep opencode:`.
 
 ## Environment setup steps
 
-- An environment variable for SD_OPENCODE should be set to tell the program
+- An environment variable for `SD_OPENCODE` should be set to tell the program
   the location of the repo
 - If not otherwise specified the environment default will only use 2 cpus.
+- An environment `SD_REPO_HOME` variable sets the root location used when
+  building non-absolute paths the in scaffold command.
 
 ## Environment variables
 
