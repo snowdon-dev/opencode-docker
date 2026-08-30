@@ -16,12 +16,12 @@ on:
 #      - main
     tags:
       - 'v*'
-    paths-ignore:
-      - 'README.md'
-      - 'Makefile'
-      - '.env'
-      - 'docker-compose*.yml'
-      - '.gitea/**'
+#    paths-ignore:
+#      - 'README.md'
+#      - 'Makefile'
+#      - '.env'
+#      - 'docker-compose*.yml'
+#      - '.gitea/**'
 
 # Serialize runs per branch/tag so `latest` is never pushed concurrently.
 concurrency:
