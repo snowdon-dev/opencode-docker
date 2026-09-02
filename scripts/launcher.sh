@@ -3,7 +3,7 @@
 MANAGE_LABEL="dev.snowdon.opencode.managed"
 WORKSPACE_LABEL="dev.snowdon.opencode.workspace"
 BACKEND_ORIGIN="${OPENCODE_BACKEND_ORIGIN:-http://localhost:4096}"
-BACKEND_HEALTH_URL="$OPENCODE_BACKEND_ORIGIN/global/health"
+BACKEND_HEALTH_URL="$BACKEND_ORIGIN/global/health"
 
 tmp_compose_dir=""
 tmp_compose_file=""
