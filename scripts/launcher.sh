@@ -2,7 +2,8 @@
 
 MANAGE_LABEL="dev.snowdon.opencode.managed"
 WORKSPACE_LABEL="dev.snowdon.opencode.workspace"
-BACKEND_HEALTH_URL="${OPENCODE_BACKEND_URL:-http://localhost:4096/global/health}"
+BACKEND_ORIGIN="${OPENCODE_BACKEND_ORIGIN:-http://localhost:4096}"
+BACKEND_HEALTH_URL="$OPENCODE_BACKEND_ORIGIN/global/health"
 
 tmp_compose_dir=""
 tmp_compose_file=""
@@ -240,7 +241,7 @@ opencode() {
       if [ "$i" -eq 200 ]; then
         echo "OpenCode server failed to start"
         echo 'It may be a delayed start'
-        echo 'Try running: command opencode attach http://localhost:4096'
+        echo "Try running: command opencode attach $BACKEND_ORIGIN"
         exit 1
       fi
       
@@ -251,7 +252,7 @@ opencode() {
   echo 'Backend ready. Attaching...'
   
   # attach a host TUI and wait. on exit kill
-  command opencode attach http://localhost:4096 "$@"
+  command opencode attach "$BACKEND_ORIGIN" "$@"
   docker compose "${OPENCODE_ARGS[@]}" exec \
     opencode pkill -f 'opencode serve' || true
 
