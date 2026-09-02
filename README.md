@@ -14,20 +14,25 @@ Pi](https://www.raspberrypi.com/). However, it should be compatible with x86.
 
 ```shell
 opencode
-opencode:exec
+opencode:exec sh
+opencode:run "npm install"
+opencode:setup "npm install"
 opencode:stop
-opencode:compose
-opencode:scaffold
+opencode:up
+opencode:new
+opencode:changes "identify issues in these changes"
+opencode:compose exec -it opencode sh
+opencode:scaffold path "the task"
+opencode:scaffold ./newmodule "Create a go module with a struct that implements two functions changes and something..."
 opencode:help
 
+opencode -c --auto
 opencode /home/other/somerepo
-
+opencode:stop /home/other/somerepo
 opencode:exec /home/other/somerepo sh
-
-opencode:scaffold somefolder "Create basic hello world html project"
-opencode:scaffold /home/pi/project-1 "Create basic hello world html project"
-opencode:scaffold gists/html-hello "Create basic hello world html project"
-opencode:scaffold gists/html-hello "$(cat /tmp/sometask.md)"
+opencode:scaffold /home/pi/repos/gists/project-1 "Create basic hello world html project"
+opencode:scaffold gists/project-1 "Create basic hello world html project"
+opencode:scaffold project-2 "$(cat /tmp/sometask.md)"
 ```
 
 
@@ -41,7 +46,7 @@ opencode:scaffold gists/html-hello "$(cat /tmp/sometask.md)"
 - [ ] Build containers full(rust, go, c, node, python) - duck(node, python) - empty.
 - [ ] In the docker compose, use build . and add a docker that uses FROM image-full
 - [ ] Fix: Allow multiple port bindings to enable multiple running agents on mulitple projects
-- [ ] Security: worktree helpers to isolate node_modules
+- [ ] Security: worktree helpers to isolate node_modules or mount a tmp_dir
 - [ ] Image extensions - use environment variable to extend from the base - or [development containers spec](https://containers.dev/implementors/spec/)
 - [ ] Project creation with scaffold extra context
 
@@ -229,6 +234,30 @@ Pushing a `v*` tag triggers the CI build (see below).
   `git-<sha>`; version tags get `latest` + the version number.
 - **Gitea Actions — `.gitea/workflows/build.yaml`**: pushes to `main` also
   trigger a Kaniko build to `registry.lan:5000/snowdon-dev/opencode`.
+
+## Testing
+
+The launcher has a small unit-test suite that runs it against a **mocked
+`docker`** binary (`tests/mockbin/docker`), so no Docker daemon is required.
+
+Instead of executing anything, the mock records the exact `docker ...` command
+each subcommand would run. The tests (`tests/run_tests.sh`) assert those invoked
+commands:
+
+```sh
+make test                 # run the whole suite
+./tests/run_tests.sh up   # run a single test by name (stop, exec, run, ...)
+```
+
+To see exactly which docker commands the launcher would issue for a given
+subcommand (e.g. `up`), run it directly with the mock on your `PATH`:
+
+```sh
+export PATH="$PWD/tests/mockbin:$PATH"
+export SD_OPENCODE="$PWD" WORKSPACE="$PWD"
+./scripts/launcher.sh up ./some/workspace
+# MOCK DOCKER: docker compose -p ... up -d opencode
+```
 
 ## Contributing
 

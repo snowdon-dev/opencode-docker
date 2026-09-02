@@ -11,7 +11,7 @@ services:
       - "sleep 999999999d"
     labels:
       - "dev.snowdon.opencode.managed=true"
-      - "dev.snowdon.opencode.workspace=${WORKSPACE:-${pwd}}"
+      - "dev.snowdon.opencode.workspace=${WORKSPACE}"
     volumes:
       - ${WORKSPACE:-.}:/workspace
       - /etc/localtime:/etc/localtime:ro
@@ -35,4 +35,4 @@ services:
       - ${OPENCODE_CARGO_GIT_DIR:-${HOME}/.cargo/git}:/home/other/.cargo/git
       - ${OPENCODE_SCCACHE_DIR:-${HOME}/.cache/sccache}:/home/other/.cache/sccache
     ports:
-      - "3000:3000"
+      - "4096:4096"

@@ -1,4 +1,4 @@
-.PHONY: build build-arch build-amd64 build-arm64 build-multi publish-multi pipeline builder tag-major tag-minor tag-patch
+.PHONY: build build-arch build-amd64 build-arm64 build-multi publish-multi pipeline builder tag-major tag-minor tag-patch test
 
 REGISTRY ?= registry.lan:5000/snowdon-dev/opencode
 DOCKERFILE ?= ./opencode/Dockerfile
@@ -53,6 +53,10 @@ pipeline: build
 builder:
 	@docker buildx inspect $(BUILDER) >/dev/null 2>&1 || \
 		docker buildx create --name $(BUILDER) --driver docker-container --bootstrap --use
+
+# Run the launcher unit tests against a mocked docker (no docker required).
+test:
+	./tests/run_tests.sh
 
 # Semantic version tagging. Requires svu (install with:
 #   go install github.com/caarlos0/svu@latest

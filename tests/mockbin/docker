@@ -1,0 +1,121 @@
+#!/bin/bash
+# Mock docker for the launcher tests.
+# Does NOT execute anything. Each invocation is recorded, one per line, to the
+# file given in $OPENCODE_TEST_DOCKER_LOG (default: stderr via echo), so tests
+# can assert the exact commands the launcher would run.
+#
+# A few subcommands are scripted to return canned output so downstream logic
+# (which reads docker output) still works:
+#   compose ps   -> prints a container id
+#   docker ps    -> prints one managed container line
+#   compose exec ... sh -c <body>  -> echoes the body back as captured output
+set -u
+
+OPENCODE_TEST_DOCKER_LOG="${OPENCODE_TEST_DOCKER_LOG:-}"
+
+mock_log() {
+  if [[ -n "$OPENCODE_TEST_DOCKER_LOG" ]]; then
+    printf '%s\n' "$*" >>"$OPENCODE_TEST_DOCKER_LOG"
+  else
+    printf 'MOCK DOCKER: %s\n' "$*"
+  fi
+}
+
+# Record the full invocation as a single log line for easy diffing.
+mock_log "docker $*"
+
+# Determine the compose subcommand (first positional that is not a flag).
+if [[ "$1" == "compose" ]]; then
+  shift
+  sub=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -p|-f|--project-name|--file) shift 2 ;;
+      -*) shift ;;
+      *) sub="$1"; shift; break ;;
+    esac
+  done
+  case "$sub" in
+    up)
+      echo "mocked: up"
+      ;;
+    down)
+      echo "mocked: down"
+      ;;
+    ps)
+      if [[ "${OPENCODE_TEST_NO_CONTAINER:-}" == "1" ]]; then
+        # Simulate "no running container" so the launcher falls back to
+        # `docker compose run` instead of `exec`.
+        exit 0
+      fi
+      echo "mocked-container-id"
+      ;;
+    exec)
+      # remaining args ... opencode <cmd> [args]
+      # consume flags, then skip the service name (opencode), then shell words
+      while [[ $# -gt 0 && "$1" != opencode ]]; do shift; done
+      [[ "$1" == "opencode" ]] && shift
+      # If the remaining words begin with sh -c <body>, echo the body back so
+      # the launcher's command substitution capture works.
+      if [[ "${1:-}" == "sh" && "${2:-}" == "-c" ]]; then
+        printf '%s\n' "${3:-}"
+      else
+        echo "mocked: exec ${*}"
+      fi
+      ;;
+    run)
+      # Mirrors exec: after consuming flags/service, if the remaining words
+      # begin with sh -c <body>, echo the body back so command-substitution
+      # capture works for the one-off (compose run) path too.
+      while [[ $# -gt 0 && "$1" != opencode ]]; do shift; done
+      [[ "$1" == "opencode" ]] && shift
+      if [[ "${1:-}" == "sh" && "${2:-}" == "-c" ]]; then
+        printf '%s\n' "${3:-}"
+      else
+        echo "mocked: run ${*}"
+      fi
+      ;;
+    *)
+      echo "mocked: compose $sub $*"
+      ;;
+  esac
+elif [[ "$1" == "ps" ]]; then
+  shift
+  # Normal case: report a single managed container. With the -q flag only the
+  # container id is printed (used by conflict detection), otherwise the old
+  # "<id>\t<workspace>" form. With OPENCODE_TEST_CONFLICT=1, report a
+  # *different* workspace so the launcher aborts with a conflict message.
+  local quiet=0
+  for a in "$@"; do [[ "$a" == "-q" ]] && quiet=1; done
+  if [[ "$quiet" == "1" ]]; then
+    echo "c1"
+  elif [[ "${OPENCODE_TEST_CONFLICT:-}" == "1" ]]; then
+    echo "c1	/workspace/other"
+  else
+    echo "c1	$PWD"
+  fi
+elif [[ "$1" == "inspect" ]]; then
+  shift
+  # Return the workspace value from the container's Config.Labels. The label is
+  # only rendered (non-empty) when not in conflict mode, so conflict detection
+  # can see the differing workspace.
+  local f=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --format) f="$2"; shift 2 ;;
+      -*) shift ;;
+      *) shift ;;
+    esac
+  done
+  if [[ "${OPENCODE_TEST_CONFLICT:-}" == "1" ]]; then
+    echo "/workspace/other"
+  else
+    echo "$PWD"
+  fi
+  # Note: f is the format string; not needed to mock the value.
+elif [[ "$1" == "rm" ]]; then
+  shift
+  echo "mocked: rm $*"
+else
+  echo "mocked: unknown $*"
+fi
