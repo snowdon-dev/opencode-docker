@@ -1,7 +1,12 @@
 #!/bin/bash
 
+MANAGE_LABEL="dev.snowdon.opencode.managed"
+WORKSPACE_LABEL="dev.snowdon.opencode.workspace"
+BACKEND_HEALTH_URL="${OPENCODE_BACKEND_URL:-http://localhost:4096/global/health}"
+
 tmp_compose_dir=""
 tmp_compose_file=""
+OPENCODE_ARGS=""
 
 # Cleanup temporary files on script exit
 cleanup() {
@@ -165,10 +170,34 @@ _opencode_ctx() {
   )
 }
 
+_backend_healthy() {
+  curl -fsS \
+    --connect-timeout 0.2 \
+    --max-time 0.5 \
+    "$BACKEND_HEALTH_URL" >/dev/null 2>&1
+}
+
+_find_docker_managed() {
+  docker ps -q \
+    --filter "label=$MANAGE_LABEL=true" 2>/dev/null
+}
+
+_find_workspace() {
+  docker inspect \
+    --format "{{index .Config.Labels \"$WORKSPACE_LABEL\"}}" \
+    "$1" 2>/dev/null
+}
+
+
 # Main function to start and run opencode in a Docker container
 # This function creates and executes the opencode container with proper
 # workspace configuration and environment isolation.
 opencode() {
+  if ! command which opencode > /dev/null 2>&1; then
+    echo "There is no opencode binary in your path"
+    echo "Try running: npm i -g opencode-ai"
+  fi
+
   # Container conflict detection.
   # The service binds a fixed host port that cannot be shared by multiple
   # running containers, so a new container cannot be created while another
@@ -181,26 +210,20 @@ opencode() {
     # Use docker inspect, not docker ps --format: .Config.Labels is always a
     # map, whereas .Labels from 'ps --format' can surface as a slice (indexing
     # a slice by string then fails), depending on the docker/compose build.
-    conflict_ws="$(docker inspect \
-      --format '{{index .Config.Labels "dev.snowdon.opencode.workspace"}}' \
-      "$conflict_id" 2>/dev/null)"
+    # TODO: docker compose runs should not be ended.
+    conflict_ws="$(_find_workspace $conflict_id)"
     if [[ -n "$conflict_ws" && "$conflict_ws" != "$ws" ]]; then
       echo "Container already running for workspace $conflict_ws." >&2
       echo "Run 'opencode:stop $conflict_ws' first, or use 'opencode:new' to" >&2
       echo "automatically remove the existing container." >&2
       exit 1
     fi
-  done < <(docker ps -q \
-    --filter "label=dev.snowdon.opencode.managed=true" 2>/dev/null)
+  done < <(_find_docker_managed)
 
   # Explicitly (re)create the container to apply the latest compose config
-  _opencode_ensure_up --recreate
+  _opencode_ensure_up
 
-  if ! curl -fsS \
-    --connect-timeout 0.2 \
-    --max-time 0.5 \
-    http://localhost:4096/global/health >/dev/null 2>&1; then
-
+  if ! _backend_healthy; then
     # Start the handler in the background
     docker compose "${OPENCODE_ARGS[@]}" exec \
       -d \
@@ -210,18 +233,14 @@ opencode() {
     echo "Waiting for the opencode backend to launch"
     # 40 secs
     for i in {1..200}; do
-      if curl -fsS \
-        --connect-timeout 0.2 \
-        --max-time 0.5 \
-        http://localhost:4096/global/health >/dev/null 2>&1; then
-        echo "OpenCode backend is ready"
+      if _backend_healthy; then
         break
       fi
 
       if [ "$i" -eq 200 ]; then
         echo "OpenCode server failed to start"
         echo 'It may be a delayed start'
-        echo 'try running $(npm prefix -g)/bin/opencode attach http://localhost:4096'
+        echo 'Try running: command opencode attach http://localhost:4096'
         exit 1
       fi
       
@@ -232,8 +251,7 @@ opencode() {
   echo 'Backend ready. Attaching...'
   
   # attach a host TUI and wait. on exit kill
-  # TODO: this should probs start in a container, and use the empty image
-  $(npm prefix -g)/bin/opencode attach http://localhost:4096 "$@"
+  command opencode attach http://localhost:4096 "$@"
   docker compose "${OPENCODE_ARGS[@]}" exec \
     opencode pkill -f 'opencode serve' || true
 
@@ -411,17 +429,14 @@ opencode:end() {
   # conflicts before removing them
   while read -r id; do
     [[ -z "$id" ]] && continue
-    ws_label="$(docker inspect \
-      --format '{{index .Config.Labels "dev.snowdon.opencode.workspace"}}' \
-      "$id" 2>/dev/null)"
+    ws_label="$(_find_workspace $1)"
     if [[ -n "$ws_label" && "$ws_label" != "$ws" ]]; then
       echo "Removing managed container $id (workspace: $ws_label)"
     else
       echo "Removing managed container $id"
     fi
     docker stop "$id"
-  done < <(docker ps -q -a --filter \
-    "label=dev.snowdon.opencode.managed=true" 2>/dev/null)
+  done < <(_find_docker_managed)
 }
 
 # Analyze the workspace branch changes with a non-interactive opencode run.
@@ -624,6 +639,13 @@ main() {
     return 0
     ;;
   esac
+
+  # Just exit if there is no docker
+  if ! docker info >/dev/null 2>&1; then
+    echo "Docker daemon is not running" >&2
+    echo "Try running: sudo systemctl start docker"
+    exit 1
+  fi
 
   # Get the workspace directory from arguments or current directory
   local ws_out="${1:-$(pwd)}"
