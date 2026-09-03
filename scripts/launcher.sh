@@ -16,7 +16,6 @@ OPENCODE_ARGS=""
 
 _cleanup_run() {
   local i
-  declare -p _cleanup_stack
   for ((i=${#_cleanup_stack[@]}-1; i>=0; i--)); do
       "${_cleanup_stack[i]}"
   done
