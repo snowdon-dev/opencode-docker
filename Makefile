@@ -5,12 +5,19 @@ DOCKERFILE ?= ./opencode/Dockerfile
 ARCH ?= amd64
 PLATFORMS ?= linux/amd64,linux/arm64
 RUST ?= true
+OPENCODE_VERSION ?= latest
+DEVCONTAINER_VERSION ?= latest
 BUILDER := snowdon-multiarch
 SVU ?= svu
 
+BUILD_ARGS = \
+	--build-arg INSTALL_RUST=$(RUST) \
+	--build-arg OPENCODE_VERSION=$(OPENCODE_VERSION) \
+	--build-arg DEVCONTAINER_VERSION=$(DEVCONTAINER_VERSION)
+
 build:
 	docker build \
-		--build-arg INSTALL_RUST=$(RUST) \
+		$(BUILD_ARGS) \
 		--progress=plain \
 		-f $(DOCKERFILE) \
 		-t $(REGISTRY) .
@@ -20,7 +27,7 @@ build:
 build-arch:
 	docker buildx build \
 		--platform linux/$(ARCH) \
-		--build-arg INSTALL_RUST=$(RUST) \
+		$(BUILD_ARGS) \
 		--progress=plain \
 		-f $(DOCKERFILE) \
 		-t $(REGISTRY):$(ARCH) \
@@ -38,7 +45,7 @@ build-multi:
 	docker buildx build \
 		--builder $(BUILDER) \
 		--platform $(PLATFORMS) \
-		--build-arg INSTALL_RUST=$(RUST) \
+		$(BUILD_ARGS) \
 		--progress=plain \
 		-f $(DOCKERFILE) \
 		-t $(REGISTRY):latest \

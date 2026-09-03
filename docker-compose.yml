@@ -4,8 +4,6 @@ services:
     #image: ghcr.io/anomalyco/opencode:1.14.47
     image: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker}
     # restart: unless-stopped
-    stdin_open: true
-    tty: true
     entrypoint: ["/bin/sh", "-c"]
     command:
       - "sleep 999999999d"
@@ -36,3 +34,13 @@ services:
       - ${OPENCODE_SCCACHE_DIR:-${HOME}/.cache/sccache}:/home/other/.cache/sccache
     ports:
       - "4096:4096"
+
+  # only run as one off
+  # TODO: smaller image
+  tui:
+    image: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker}
+    stdin_open: true
+    tty: true
+    labels:
+      - "dev.snowdon.opencode.managed=true"
+      - "dev.snowdon.opencode.workspace=${WORKSPACE}"

@@ -1,25 +1,74 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
+SD_OPENCODE="${SD_OPENCODE:-$HOME/opencode}"
 MANAGE_LABEL="dev.snowdon.opencode.managed"
 WORKSPACE_LABEL="dev.snowdon.opencode.workspace"
-BACKEND_ORIGIN="${OPENCODE_BACKEND_ORIGIN:-http://localhost:4096}"
-BACKEND_HEALTH_URL="$BACKEND_ORIGIN/global/health"
+IMAGE_URL="${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker}"
+LOOPBACK="127.0.0.1"
+
+declare -ga _cleanup_stack=()
 
 tmp_compose_dir=""
 tmp_compose_file=""
+
 OPENCODE_ARGS=""
 
-# Cleanup temporary files on script exit
-cleanup() {
+
+_cleanup_run() {
+  local i
+  declare -p _cleanup_stack
+  for ((i=${#_cleanup_stack[@]}-1; i>=0; i--)); do
+      "${_cleanup_stack[i]}"
+  done
+}
+cleanup_add() {
+    _cleanup_stack+=("$1")
+}
+
+# traps for proper cleanup and signal handling
+trap _cleanup_run EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+
+# clean up time main files with the docker compose merge
+_cleanup() {
   if [[ -n "$tmp_compose_dir" && -d "$tmp_compose_dir" ]]; then
     rm -rf -- "$tmp_compose_dir"
   fi
 }
 
-# Set traps for proper cleanup and signal handling
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+# print a message about the current git details of the cwd
+_print_git_context() {
+  if ! which git > /dev/null; then
+    return
+  fi
+  if [[ ! -d .git ]]; then
+    return
+  fi
+
+  echo "\nAdditional project context:
+
+The author details for this task:
+Name: $(git config --global user.name)
+Email: $(git config --global user.email)
+
+git log --stat:
+\`\`\`
+$(git log --stat | cat)
+\`\`\`"
+}
+
+# print details about the readme file is one exists in cwd
+_print_readme() {
+  if [[ ! -f ./README.md ]]; then
+    return
+  fi
+  echo "\nREADME.md:
+\`\`\`
+$(cat README.md)
+\`\`\`"
+}
 
 # Prepares the Docker Compose arguments. This function sets up the project
 # configuration including network settings and git directory mounts.
@@ -59,6 +108,7 @@ _opencode_args_prepare() {
   # Vendor/build/test-artifact directories are pruned so throwaway nested repos
   # (e.g. node_modules, tests/.tmp sandboxes) aren't mounted or counted, which
   # keeps the compose config stable across command invocations.
+  # TODO: read the exlcude list from .gitignore?
   while IFS= read -r -d '' git_dir; do
       git_dirs+=("$git_dir")
       echo "read-only locking dir: $git_dir"
@@ -162,9 +212,15 @@ _opencode_ctx() {
 
   local -a args=()
   _opencode_args_prepare "$ws" "$proj" args || return 1
+  cleanup_add _cleanup
+
   OPENCODE_ARGS=("${args[@]}")
 
   (
+    # traps inside subshell for proper cleanup and signal handling
+    trap _cleanup_run EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     cd "$ws" || exit 1
     export WORKSPACE="$ws"
     "$fn" "$@"
@@ -172,6 +228,7 @@ _opencode_ctx() {
 }
 
 _backend_healthy() {
+  local BACKEND_HEALTH_URL="${OPENCODE_BACKEND_ORIGIN:-http://$LOOPBACK:4096}"
   curl -fsS \
     --connect-timeout 0.2 \
     --max-time 0.5 \
@@ -189,16 +246,30 @@ _find_workspace() {
     "$1" 2>/dev/null
 }
 
+_run_opencode_executable() {
+  if command which opencode > /dev/null 2>&1; then
+    local BACKEND_ORIGIN="${OPENCODE_BACKEND_ORIGIN:-http://$LOOPBACK:4096}"
+    echo "Using opencode tui $(command which opencode)"
+    command opencode attach "$BACKEND_ORIGIN" "$@"
+  else
+    local BACKEND_ORIGIN="${OPENCODE_BACKEND_ORIGIN:-http://opencode:4096}"
+    # this need to be able to pass info to healthy, without a port
+    docker compose "${OPENCODE_ARGS[@]}" run --rm --remove-orphans tui \
+      attach "$BACKEND_ORIGIN" \
+      "$@"
+  fi
+}
+
+_cleanup_opencode_backend() {
+  docker compose "${OPENCODE_ARGS[@]}" exec \
+    opencode pkill -f 'opencode serve' || true
+}
+
 
 # Main function to start and run opencode in a Docker container
 # This function creates and executes the opencode container with proper
 # workspace configuration and environment isolation.
 opencode() {
-  if ! command which opencode > /dev/null 2>&1; then
-    echo "There is no opencode binary in your path"
-    echo "Try running: npm i -g opencode-ai"
-  fi
-
   # Container conflict detection.
   # The service binds a fixed host port that cannot be shared by multiple
   # running containers, so a new container cannot be created while another
@@ -208,6 +279,14 @@ opencode() {
   local conflict_id conflict_ws
   while read -r conflict_id; do
     [[ -z "$conflict_id" ]] && continue
+
+    oneoff=$(docker inspect \
+      --format '{{ index .Config.Labels "com.docker.compose.oneoff" }}' \
+      "$conflict_id" 2>/dev/null)
+    if [ "$oneoff" = "True" ]; then
+      continue
+    fi
+
     # Use docker inspect, not docker ps --format: .Config.Labels is always a
     # map, whereas .Labels from 'ps --format' can surface as a slice (indexing
     # a slice by string then fails), depending on the docker/compose build.
@@ -220,10 +299,14 @@ opencode() {
       exit 1
     fi
   done < <(_find_docker_managed)
-
-  # Explicitly (re)create the container to apply the latest compose config
+  
+  # start the containers
   _opencode_ensure_up
-
+  
+  # ensure cleanup afterwards
+  cleanup_add _cleanup_opencode_backend
+  
+  # start or resuse and existing container for the workspace
   if ! _backend_healthy; then
     # Start the handler in the background
     docker compose "${OPENCODE_ARGS[@]}" exec \
@@ -241,7 +324,6 @@ opencode() {
       if [ "$i" -eq 200 ]; then
         echo "OpenCode server failed to start"
         echo 'It may be a delayed start'
-        echo "Try running: command opencode attach $BACKEND_ORIGIN"
         exit 1
       fi
       
@@ -250,11 +332,9 @@ opencode() {
   fi
 
   echo 'Backend ready. Attaching...'
-  
+
   # attach a host TUI and wait. on exit kill
-  command opencode attach "$BACKEND_ORIGIN" "$@"
-  docker compose "${OPENCODE_ARGS[@]}" exec \
-    opencode pkill -f 'opencode serve' || true
+  _run_opencode_executable "$@"
 
   # Verify container status after execution
   container_id="$(docker compose "${OPENCODE_ARGS[@]}" ps -q -a opencode)"
@@ -262,7 +342,8 @@ opencode() {
     echo "The container was removed: $container_id"
     exit 1
   else
-    echo "The opencode process ended. container_id: $container_id"
+    echo "The opencode process ended"
+    echo "Cid: $container_id"
   fi
 }
 
@@ -311,8 +392,8 @@ opencode:compose() {
   docker compose "${OPENCODE_ARGS[@]}" "$@"
 }
 
-# Stop and remove all opencode containers for the specified project
-# This function gracefully shuts down the container and cleans up resources
+# Stop all managed opencode containers for the specified project
+# This function stops managed containers and cleans up resources
 # while preserving the workspace configuration.
 opencode:stop() {
   echo "Stopping opencode project: $proj ($ws)"
@@ -330,37 +411,6 @@ opencode:up() {
   docker compose "${OPENCODE_ARGS[@]}" up -d opencode "$@"
 }
 
-# Initialize a git repository in the specified directory
-# This function creates a new git repository with an initial commit
-# containing a README file. Used during the scaffold command.
-setup_git_dir() {
-  if ! which git > /dev/null; then
-    return
-  fi
-
-  # Initialize git repository and create initial commit
-  git init # assumed directory is empty
-  echo "# $1" > README.md
-  git add README.md
-  git commit -m "Initial commit."
-}
-
-print_git_context() {
-  if ! which git > /dev/null; then
-    return
-  fi
-  echo "\nAdditional project context:
-
-The author details for this task:
-Name: $(git config --global user.name)
-Email: $(git config --global user.email)
-
-git log --stat:
-\`\`\`
-$(git log --stat | cat)
-\`\`\`"
-}
-
 # Create a new opencode project scaffold with git initialization
 # This function sets up a new project workspace with proper configuration
 # and launches the opencode runner to begin development.
@@ -376,9 +426,6 @@ opencode:scaffold() {
   # Configure CPU resources for the container
   local cpus="${OPENCODE_CPUSET:-2-3}"
 
-  # Initialize git repository in the workspace
-  setup_git_dir "$proj"
-
   # Build context information for the opencode runner. Reduces execution
   # overhead and could eliminate a dependency on shell environment within the
   # container.
@@ -391,12 +438,8 @@ Workspace contents of /workspace:
 \`\`\`
 $(ls -la $ws)
 \`\`\`
-
-README.md:
-\`\`\`
-$(cat README.md)
-\`\`\`
-$(print_git_context)
+$(_print_readme)
+$(_print_git_context)
 </task-information>
 
 Your task is as follows:
@@ -422,21 +465,40 @@ opencode:new() {
   opencode "$@"
 }
 
-
+# Stops the existing managed containers
 opencode:end() {
-  echo "Removing existing opencode containers for project: $proj ($ws)"
+  echo "Stopping existing opencode containers for project: $proj ($ws)"
 
   # Inspect managed containers and their workspace labels to warn about
-  # conflicts before removing them
+  # conflicts before stopping them
   while read -r id; do
     [[ -z "$id" ]] && continue
     ws_label="$(_find_workspace $1)"
     if [[ -n "$ws_label" && "$ws_label" != "$ws" ]]; then
-      echo "Removing managed container $id (workspace: $ws_label)"
+      echo "Stopping managed container $id (workspace: $ws_label)"
     else
-      echo "Removing managed container $id"
+      echo "Stopping managed container $id"
     fi
     docker stop "$id"
+  done < <(_find_docker_managed)
+}
+
+# Force-remove all managed opencode containers.
+# Unlike 'end' which gracefully stops containers, this immediately removes
+# them using 'docker rm -f', which is useful when a container is stuck or
+# when you need to fully clean up.
+opencode:delete() {
+  echo "Force-removing existing opencode containers for project: $proj ($ws)"
+
+  while read -r id; do
+    [[ -z "$id" ]] && continue
+    ws_label="$(_find_workspace $1)"
+    if [[ -n "$ws_label" && "$ws_label" != "$ws" ]]; then
+      echo "Force-removing managed container $id (workspace: $ws_label)"
+    else
+      echo "Force-removing managed container $id"
+    fi
+    docker rm -f "$id"
   done < <(_find_docker_managed)
 }
 
@@ -561,9 +623,8 @@ _opencode_help_cmd() {
   scaffold)
     echo "scaffold [name] [opencode args...]"
     echo "  Create a new opencode project. Without a name, uses the current directory"
-    echo "  (which must be empty); with a name, creates a fresh git repo under"
-    echo "  SD_REPO_HOME (default: /home/<user>/repos) or a relative path, then runs"
-    echo "  an interactive opencode scaffolding session."
+    echo "  (which must be empty); with a name, SD_REPO_HOME (default: /home/<user>/repos)"
+    echo "  or a relative path, then runs an interactive opencode scaffolding session."
     echo "  Args:"
     echo "    name               Project name or './relative/path'. Optional."
     echo "    opencode args...   Additional arguments forwarded to the opencode CLI."
@@ -574,6 +635,43 @@ _opencode_help_cmd() {
     echo "  start a fresh container and opencode session."
     echo "  Args:"
     echo "    opencode args...   Additional arguments forwarded to the opencode CLI."
+    ;;
+  shell)
+    echo "shell [args...]"
+    echo "  Open an interactive shell inside the opencode container. This is a"
+    echo "  convenience alias for 'exec sh'. Creates the container first if needed."
+    echo "  Args:"
+    echo "    args...   Additional arguments passed to 'sh' inside the container."
+    ;;
+  end)
+    echo "end"
+    echo "  Stop all managed opencode containers across workspaces. This stops"
+    echo "  containers labelled as managed, freeing their ports."
+    echo "  Args:"
+    echo "    (none)"
+    ;;
+  delete)
+    echo "delete"
+    echo "  Force-remove all managed opencode containers across workspaces using"
+    echo "  'docker rm -f'. Immediately removes stuck or unwanted containers."
+    echo "  Args:"
+    echo "    (none)"
+    ;;
+  security)
+    echo "security"
+    echo "  Analyse the repository for potential security risks such as executable"
+    echo "  commands in normal usage (e.g. npm pre-install scripts)."
+    echo "  NOTE: This command is not yet implemented."
+    echo "  Args:"
+    echo "    (none)"
+    ;;
+  clone)
+    echo "clone [args...]"
+    echo "  Retrieve a git repository and clone it into a managed location."
+    echo "  'clone --check' should run security analysis first."
+    echo "  NOTE: This command is not yet implemented."
+    echo "  Args:"
+    echo "    args...   Repository URL and destination arguments."
     ;;
   changes)
     echo "changes [task...]"
@@ -613,13 +711,54 @@ opencode:help() {
   printf '  %-11s %s\n' "compose"  "Pass arguments straight through to Docker Compose"
   printf '  %-11s %s\n' "scaffold" "Create a new opencode project with a fresh git repo"
   printf '  %-11s %s\n' "new"      "Remove conflicting containers and start a fresh session"
+  printf '  %-11s %s\n' "shell"    "Open an interactive shell inside the running container"
+  printf '  %-11s %s\n' "end"      "Stop all managed opencode containers across workspaces"
+  printf '  %-11s %s\n' "delete"   "Force-remove all managed opencode containers across workspaces"
   printf '  %-11s %s\n' "changes"  "Analyse the branch changes and propose a plan"
+  printf '  %-11s %s\n' "security" "Analyse the repository for potential security risks (not implemented)"
+  printf '  %-11s %s\n' "clone"    "Clone a git repository into a managed location (not implemented)"
   printf '  %-11s %s\n' "help"     "Show help; 'help <command>' for command details"
   echo
   echo "The workspace defaults to the current directory, and SD_OPENCODE points to"
   echo "the compose directory (default: \$HOME/opencode)."
   echo
   echo "Run '$0 help <command>' for details on a specific command."
+
+  local image="devsnowdon/opencode-docker"
+
+  if docker image inspect "$image" >/dev/null 2>&1; then
+    echo
+    local opencode_version
+    local devcontainer_version
+
+    opencode_version="$(
+      docker image inspect "$IMAGE_URL" \
+        --format '{{ index .Config.Labels "dev.snowdon.image.opencode.version" }}'
+    )"
+
+    devcontainer_version="$(
+      docker image inspect "$IMAGE_URL" \
+        --format '{{ index .Config.Labels "dev.snowdon.image.opencode.devcontainer" }}'
+    )"
+
+    local tags="$(git -C "$SD_OPENCODE" describe --tags --exact-match 2>/dev/null || echo unknown)"
+    local commit="$(git -C "$SD_OPENCODE" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+
+    echo "Docker image:       $IMAGE_URL"
+    echo "OpenCode version:   ${opencode_version:-unknown}"
+    echo "Devcontainer:       ${devcontainer_version:-unknown}"
+
+    # Get the current git location from ~/opencode
+    echo "Git location:       $SD_OPENCODE"
+    echo "Git tag:            $tags"
+    echo "Git commit:         $commit"
+
+    # Ask the image itself what OpenCode reports
+    local cli_version
+    cli_version="$(command opencode --version 2>/dev/null)"
+
+    echo "CLI version:        ${cli_version:-unknown}"
+  fi
 }
 
 # Main entry point for the opencode launcher script
@@ -644,7 +783,7 @@ main() {
   # Just exit if there is no docker
   if ! docker info >/dev/null 2>&1; then
     echo "Docker daemon is not running" >&2
-    echo "Try running: sudo systemctl start docker"
+    echo "Try something like: sudo systemctl start docker"
     exit 1
   fi
 
@@ -671,7 +810,10 @@ main() {
         ws_out="$(pwd)"
       elif [[ "$name" == ./* ]]; then
         name="${name#./}"
-        ws_out="$PWD/$name"
+        ws_out="$(pwd)/$name"
+      elif [[ "$name" == /* ]]; then
+        ## if absolute
+        ws_out="$name"
       else
         ws_out="${SD_REPO_HOME:-/home/$USER/repos}/$name"
       fi
@@ -706,10 +848,14 @@ main() {
           ws_out=$(realpath -- "$tmp_ws_out")
 
       else
-          # Create new directory for the project
+        if [[ $# -ge 2 ]]; then
+          # if the first is the path, and the second is the task
           echo "Creating $tmp_ws_out"
           mkdir -p -- "$tmp_ws_out" || exit 1
           ws_out=$(realpath -- "$tmp_ws_out")
+        else
+          ws_out=$(pwd)
+        fi
       fi
     fi
     ;;
@@ -746,6 +892,9 @@ main() {
   compose)
     _opencode_ctx opencode:compose "$ws" "$proj" "$@"
     ;;
+  shell)
+    _opencode_ctx opencode:exec "$ws" "$proj" sh "$@"
+    ;;
   up)
     # Start containers without running processes
     _opencode_ctx opencode:up "$ws" "$proj" "$@"
@@ -767,6 +916,9 @@ main() {
     ;;
   end)
     opencode:end "$ws" "$proj" "$@"
+    ;;
+  delete)
+    opencode:delete "$ws" "$proj" "$@"
     ;;
   changes)
     # Analyze branch changes for the workspace

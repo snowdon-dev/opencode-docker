@@ -1,21 +1,23 @@
 name: build & push opencode (Docker Hub)
 
 on:
-  workflow_dispatch:
-    inputs:
-      rust:
-        description: 'Install the full Rust toolchain (INSTALL_RUST=true)'
-        type: choice
-        required: false
-        default: 'true'
-        options:
-          - 'true'
-          - 'false'
   push:
-#    branches:
-#      - main
     tags:
       - 'v*'
+
+#  workflow_dispatch:
+#    inputs:
+#      rust:
+#        description: 'Install the full Rust toolchain (INSTALL_RUST=true)'
+#        type: choice
+#        required: false
+#        default: 'true'
+#        options:
+#          - 'true'
+#          - 'false'
+
+#    branches:
+#      - main
 #    paths-ignore:
 #      - 'README.md'
 #      - 'Makefile'
@@ -35,7 +37,7 @@ jobs:
       contents: read
 
     steps:
-      - name: Checkout
+      - name: Checkout latest tag
         uses: actions/checkout@v6
 
       - name: Resolve Docker Hub image name
@@ -69,6 +71,19 @@ jobs:
           fi
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
 
+      - name: Get latest release
+        id: release
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { data } = await github.rest.repos.getLatestRelease({
+              owner: 'anomalyco',
+              repo: 'opencode'
+            });
+            const tag = data.tag_name;
+            const version = tag.startsWith('v') ? tag.slice(1) : tag;
+            core.setOutput('latest', version);
+
       - name: Build and push
         uses: docker/build-push-action@v7
         with:
@@ -79,6 +94,8 @@ jobs:
           tags: ${{ steps.tags.outputs.tags }}
           build-args: |
             INSTALL_RUST=${{ inputs.rust || 'true' }}
+            OPENCODE_VERSION=${{ steps.release.outputs.latest }}
+            DEVCONTAINER_VERSION=${{github.ref}}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

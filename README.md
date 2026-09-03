@@ -13,26 +13,33 @@ This project has been desgined for arm archetecture devices like the [Raspberry
 Pi](https://www.raspberrypi.com/). However, it should be compatible with x86.
 
 ```shell
+opencode:help
 opencode
-opencode:exec sh
+opencode:new
 opencode:run "npm install"
+opencode:up
 opencode:setup "npm install"
 opencode:stop
-opencode:up
-opencode:new
-opencode:changes "identify issues in these changes"
+opencode:exec sh
 opencode:compose exec -it opencode sh
+opencode:changes "identify issues in these changes"
 opencode:scaffold path "the task"
-opencode:scaffold ./newmodule "Create a go module with a struct that implements two functions changes and something..."
-opencode:help
 
 opencode -c --auto
 opencode /home/other/somerepo
-opencode:stop /home/other/somerepo
 opencode:exec /home/other/somerepo sh
+opencode:stop /home/other/somerepo
 opencode:scaffold /home/pi/repos/gists/project-1 "Create basic hello world html project"
 opencode:scaffold gists/project-1 "Create basic hello world html project"
 opencode:scaffold project-2 "$(cat /tmp/sometask.md)"
+
+mkdir "$HOME/repos/gists/gotester" && cd "$HOME/repos/gists/gotester"
+oc:sf ./ "Create a hello world go project."
+oc:sf ./newmodule "Create a golang package that exports a function that adds integers. No go.mod"
+
+OPENCODE_IMAGE_URL="my-custom-image" opencode
+OPENCODE_NETWORK="custom-network" opencode
+
 ```
 
 
@@ -98,7 +105,8 @@ plugins=(... opencode)
 ```
 
 After restarting your shell (`exec zsh`). View the avaliable commands by
-running `alias | grep oc` or `alias | grep opencode`.
+running `alias | grep -E ^oc` or `alias | grep opencode`. Then try running
+`opencode:help` to see the full help information.
 
 ## Environment setup steps
 
@@ -107,6 +115,8 @@ running `alias | grep oc` or `alias | grep opencode`.
 - If not otherwise specified the environment default will only use 2 cpus.
 - An environment `SD_REPO_HOME` variable sets the root location used when
   building non-absolute paths in the scaffold command.
+- The opencode binary is also required in the shell path to run the TUI `npm i -g opencode-ao`
+- Docker is required [docker.io](https://www.docker.com/)
 
 ## Environment variables
 
@@ -275,6 +285,36 @@ change per request.
 - `docker-compose.git.yml` mounts the workspace's `.git` directories read-only
   and `docker-compose.network.yml` attaches an external network
   (`OPENCODE_NETWORK`); both overlay the base file via `-f`.
+
+### Start extending with custom functions
+
+```shell
+gist() {
+  local name=$1
+  shift
+
+  cd "$SD_HOME/gists/$name" || {
+    if (( $# == 0 )); then
+      printf 'Warning:\n gist Directory does not exist\nNo scaffold description was provided.\n' >&2
+      return 1
+    fi
+
+    mkdir "gists/$name"
+
+    if which git > /dev/null; then
+      # Initialize git repository and create initial commit
+      git init # assumed directory is empty
+      echo "# $name" > README.md
+      git add README.md
+      git commit -m "Initial commit."
+    fi
+
+    opencode:scaffold "gists/$name" "$@"
+  }
+}
+```
+
+Please share your extensions in the discussions section.
 
 ## License
 

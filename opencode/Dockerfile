@@ -1,6 +1,10 @@
-FROM ghcr.io/anomalyco/opencode:1.18.25 AS opencode
+ARG OPENCODE_VERSION=latest
+FROM ghcr.io/anomalyco/opencode:${OPENCODE_VERSION} AS opencode
 FROM alpine:3.24
-
+ARG OPENCODE_VERSION=latest
+ARG DEVCONTAINER_VERSION
+LABEL dev.snowdon.image.opencode.version="${OPENCODE_VERSION}"
+LABEL dev.snowdon.image.opencode.devcontainer="${DEVCONTAINER_VERSION}"
 
 ## TODO: handle any files left in /root from the opencode base
 
@@ -48,6 +52,17 @@ RUN apk add --no-cache \
     libgcc=15.2.0-r5 \
     libstdc++=15.2.0-r5
 
+# Smoke tests for system packages
+RUN python3 --version \
+    && go version \
+    && node --version \
+    && npm --version \
+    && git --version \
+    && curl --version \
+    && make --version \
+    && rg --version \
+    && bash --version
+
 RUN if [ "$INSTALL_RUST" = "true" ]; then \
         apk add --no-cache \
             build-base=0.5-r4 \
@@ -88,6 +103,12 @@ RUN go install golang.org/x/tools/gopls@v0.21.1 \
     && curl -sSfL https://golangci-lint.run/install.sh \
         | sh -s -- -b "$GOPATH/bin" v2.11.4 \
     && go clean -cache -modcache
+
+# Smoke tests for Go tools
+RUN gopls version \
+    && dlv version \
+    && swag --version \
+    && golangci-lint version
 
 # ------------------------------------------------------------
 # Optional Rust environment
@@ -136,6 +157,14 @@ RUN if [ "$INSTALL_RUST" = "true" ]; then \
             /home/$USERNAME/.cargo/registry/src \
             /home/$USERNAME/.cargo/git/checkouts \
             /home/$USERNAME/.cargo/git/db; \
+    fi
+
+# Smoke tests for Rust tools (only when installed)
+RUN if [ "$INSTALL_RUST" = "true" ]; then \
+        rustup --version \
+        && rustc --version \
+        && cargo --version \
+        && sccache --version; \
     fi
 
 # Configure sccache AFTER it has been installed
