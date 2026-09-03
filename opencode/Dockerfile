@@ -44,7 +44,7 @@ RUN apk add --no-cache \
     nodejs=24.18.1-r0 \
     npm=11.12.1-r0 \
     git=2.54.0-r0 \
-    curl=8.21.0-r0 \
+    curl=8.22.0-r0 \
     make=4.4.1-r4 \
     libpcap-dev=1.10.6-r1 \
     bash=5.3.9-r1 \
