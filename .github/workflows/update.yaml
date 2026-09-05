@@ -168,8 +168,8 @@ jobs:
           go install github.com/caarlos0/svu@latest
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
 
-      - name: Tag minor
-        run: make tag-minor
+      - name: Tag patch 
+        run: make tag-patch
 
 #      - name: Tag patch
 #        if: steps.release.outputs.bump == 'patch'
