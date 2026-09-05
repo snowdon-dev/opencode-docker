@@ -26,7 +26,10 @@ opencode:run "npm install"
 opencode:up
 opencode:setup "npm install"
 opencode:stop
+opencode:end
+opencode:delete
 opencode:exec sh
+opencode:shell
 opencode:compose exec -it opencode sh
 opencode:changes "identify issues in these changes"
 opencode:scaffold path "the task"
@@ -64,7 +67,7 @@ opencode:setup "npm intsall" && opencode
 - [x] [ohmyzsh](https://github.com/ohmyzsh/ohmyzsh/wiki/Customization) plugin abillity
 - [x] [Add github build - docker step by step guide](https://docs.docker.com/guides/gha/)
 - [x] Prevent large arguments leaks and enable task via std
-- [ ] Allow easy mounting of the config dir
+- [x] Allow easy mounting of the config dir
 - [ ] Layered containers - full(rust, go, c, node, python) - duck(node, python) - empty.
 - [ ] Layered containers - [development containers spec](https://containers.dev/implementors/spec/)
 - [ ] Layered containers - In the docker compose, use build. and add a docker that uses FROM image-full
@@ -86,6 +89,13 @@ This also means a `.env` placed in the repository root is picked up by both
 plain `docker compose` runs and the launcher. See [Environment
 variables](#environment-variables).
 
+`docker-compose.yml` now has a `build:` section, so `docker compose up` builds
+the local image from the repository `Dockerfile` (which layers on top of the
+published [base image](https://hub.docker.com/r/devsnowdon/opencode-docker))
+unless `OPENCODE_IMAGE_URL` points at a prebuilt image. Run `opencode:update`
+(alias `oc:u`) or `docker compose pull && docker compose build` to refresh it
+after a new release.
+
 ## Container Usage
 
 You should use the opencode launcher utility to launch the container. As it needs environment variables to (like WORKSPACE) init properly. See oh-my-zsh plugin.
@@ -95,13 +105,20 @@ docker compose up -d opencode
 docker compose exec -w /workspace opencode opencode
 ```
 
+When `opencode` (the `start` command) runs, the launcher starts an
+`opencode serve` backend inside the container on port `4096`, waits until it
+is healthy, and then attaches a TUI to it — using a host `opencode` binary if
+one is on the `PATH`, otherwise the one-off `tui` compose service. The old
+backend is killed when the TUI exits.
+
 ## oh-my-zsh plugin
 
 Instead of running the compose directly, install as a omz plugin for handy commands.
 
 `omz/opencode.zsh` provides shell aliases (`opencode`, `oc`, `oc:s`,
-`oc:u`, `oc:e`, `oc:c`, ...) wrapping the launcher. Link it as an oh-my-zsh
-custom plugin:
+`oc:u`, `oc:e`, `oc:c`, ...) wrapping the launcher. It also defines
+`opencode:update` (alias `oc:u`), which pulls the base image and rebuilds the
+local image layered on top of it. Link it as an oh-my-zsh custom plugin:
 
 ```sh
 mkdir -p "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/opencode"
@@ -194,6 +211,7 @@ default pointing at the conventional location under your home directory
 | `OPENCODE_NETWORK`         | –                                | – (external network, see `docker-compose.network.yml`) |
 | `OPENCODE_CACHE_DIR`       | `$HOME/.cache/opencode/cache`    | `/home/other/.cache/opencode/cache` |
 | `OPENCODE_DATA_DIR`        | `$HOME/.local/share/opencode`    | `/home/other/.local/share/opencode` |
+| `OPENCODE_CONFIG_DIR`      | `$HOME/.config/opencode`         | `/home/other/.config`               |
 | `OPENCODE_PIP_CACHE_DIR`   | `$HOME/.cache/pip`               | `/home/other/.cache/pip`            |
 | `OPENCODE_NPM_CACHE_DIR`   | `$HOME/.npm`                     | `/home/other/.npm`                  |
 | `OPENCODE_GO_BUILD_CACHE_DIR` | `$HOME/.cache/go-build`       | `/home/other/.cache/go-build`       |
@@ -348,6 +366,12 @@ change per request.
 - `docker-compose.git.yml` mounts the workspace's `.git` directories read-only
   and `docker-compose.network.yml` attaches an external network
   (`OPENCODE_NETWORK`); both overlay the base file via `-f`.
+- The compose file bind-mounts the host config directory
+  (`OPENCODE_CONFIG_DIR`, default `$HOME/.config/opencode`) at
+  `/home/other/.config`, and mounts this repository's `opencode/agent.md`
+  read-only over the container's AGENTS.md
+  (`/home/other/.config/opencode/AGENTS.md`). Edit the file to customise the
+  system prompt the agents run under.
 
 ### Start extending with custom functions
 
