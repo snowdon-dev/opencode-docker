@@ -15,33 +15,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: write
 
     steps:
-      - name: Get latest semantic version tag
-        id: latest_tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG=$(
-            gh api --paginate "repos/${{ github.repository }}/tags?per_page=100" \
-              --jq '.[].name' |
-            grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' |
-            sort -V |
-            tail -n 1
-          )
-
-          if [ -z "$TAG" ]; then
-            echo "No semantic version tag found"
-            exit 1
-          fi
-
-          echo "Latest semantic version tag: $TAG"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout latest tag
+      - name: Checkout main
         uses: actions/checkout@v6
         with:
-          ref: ${{ steps.latest_tag.outputs.tag }}
+          ref: main
           fetch-depth: 0
           fetch-tags: true
 
@@ -84,12 +64,12 @@ jobs:
             const { data } = await github.rest.repos.listReleases({
               owner: 'anomalyco',
               repo: 'opencode',
-              per_page: 3
+              per_page: 2
             });
 
             const published = data.filter(r => !r.draft && !r.prerelease);
-            if (published.length < 2) {
-              core.setFailed('Could not find two published OpenCode releases');
+            if (published.length < 1) {
+              core.setFailed('Could not find a published OpenCode release');
               return;
             }
 
@@ -109,42 +89,22 @@ jobs:
             const latestVersion = parseVersion(latest);
 
             const imageVersion = process.env.PREVIOUS_IMAGE_VERSION || '';
-            let base = imageVersion;
 
-            // No previous image yet (first build): fall back to the
-            // second-newest release so the minor/patch decision still works.
-            if (!base) {
-              base = published[1].tag_name.replace(/^v/, '');
+            function isNewer(a, b) {
+              return a.major > b.major ||
+                (a.major === b.major && a.minor > b.minor) ||
+                (a.major === b.major && a.minor === b.minor &&
+                 a.patch > b.patch);
             }
 
-            const baseVersion = parseVersion(base);
-
-            const isNewer =
-              latestVersion.major > baseVersion.major ||
-              (latestVersion.major === baseVersion.major &&
-               latestVersion.minor > baseVersion.minor) ||
-              (latestVersion.major === baseVersion.major &&
-               latestVersion.minor === baseVersion.minor &&
-               latestVersion.patch > baseVersion.patch);
-
-            const updated = !imageVersion || isNewer;
-
-            const bump = !updated
-              ? 'none'
-              : latestVersion.major !== baseVersion.major ||
-                latestVersion.minor !== baseVersion.minor
-                ? 'minor'
-                : 'patch';
+            const updated = !imageVersion || isNewer(latestVersion, parseVersion(imageVersion));
 
             core.info(`Image OpenCode version: ${imageVersion || '<none>'}`);
-            core.info(`Bump base:              ${base}`);
             core.info(`Latest OpenCode:        ${latest}`);
             core.info(`Updated:                ${updated}`);
-            core.info(`Required bump:          ${bump}`);
 
             core.setOutput('latest', latest);
             core.setOutput('major', latestVersion.major);
-            core.setOutput('bump', bump);
             core.setOutput('updated', String(updated));
 
       - name: Exit if opencode has not been updated
@@ -168,9 +128,20 @@ jobs:
           go install github.com/caarlos0/svu@latest
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
 
-      - name: Tag patch 
-        run: make tag-patch
+      # Computed once, then reused: create and push the next patch tag, and
+      # dispatch build-push.yaml on that exact tag. Pushes made with the
+      # default GITHUB_TOKEN do not emit workflow events, so the explicit
+      # dispatch below is required.
+      - name: Tag patch
+        id: tag
+        run: |
+          TAG="$(svu patch)"
+          echo "Creating and pushing tag $TAG"
+          git tag "$TAG"
+          git push origin "$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-#      - name: Tag patch
-#        if: steps.release.outputs.bump == 'patch'
-#        run: make tag-patch
+      - name: Trigger build & push
+        run: |
+          echo "Dispatching 'build & push opencode (Docker Hub)' for ${{ steps.tag.outputs.tag }}"
+          gh workflow run build-push.yaml --ref "${{ steps.tag.outputs.tag }}"

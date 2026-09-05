@@ -13,8 +13,8 @@ the image (Go, Rust, Node, Python).
 This project has been designed for arm architecture devices like the [Raspberry
 Pi](https://www.raspberrypi.com/). However, it should be compatible with x86.
 
-The version of opencode is best-effort and updated periodically, feel free to
-file an issue if it is out-of-date. See [Build](#build) section.
+The version of opencode is best-effort and updated periodically (weekly), feel
+free to file an issue if it is out-of-date. See [Build](#build) section.
 
 ## Usage
 
