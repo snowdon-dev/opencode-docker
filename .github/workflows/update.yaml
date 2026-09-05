@@ -169,9 +169,8 @@ jobs:
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
 
       - name: Tag minor
-        if: steps.release.outputs.bump == 'minor'
         run: make tag-minor
 
-      - name: Tag patch
-        if: steps.release.outputs.bump == 'patch'
-        run: make tag-patch
+#      - name: Tag patch
+#        if: steps.release.outputs.bump == 'patch'
+#        run: make tag-patch
