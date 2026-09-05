@@ -1,4 +1,4 @@
-alias opencode:update='( cd $SD_OPENCODE && git pull && docker compose pull && docker compose build)'
+alias opencode:update='$SD_OPENCODE/scripts/launcher.sh update'
 alias opencode='$SD_OPENCODE/scripts/launcher.sh start'
 alias opencode:stop='$SD_OPENCODE/scripts/launcher.sh stop'
 alias opencode:exec='$SD_OPENCODE/scripts/launcher.sh exec'

@@ -419,6 +419,26 @@ opencode:compose() {
   docker compose "${OPENCODE_ARGS[@]}" "$@"
 }
 
+# Update the opencode launcher installation.
+# Unlike the other commands this is not tied to a workspace or compose project:
+# it only refreshes the launcher repo and images inside $SD_OPENCODE.
+opencode:update() {
+  echo "Updating opencode launcher: $SD_OPENCODE"
+
+  # Refresh the repository holding the launcher, compose file, and Dockerfile.
+  git -C "$SD_OPENCODE" pull
+
+  (
+    cd "$SD_OPENCODE" || exit 1
+
+    # Pull the 'tui' service image (the only service with an explicit image:).
+    docker compose pull
+
+    # Build the 'opencode' image, refreshing the base FROM image first.
+    docker compose build --pull
+  )
+}
+
 # Stop all managed opencode containers for the specified project
 # This function stops managed containers and cleans up resources
 # while preserving the workspace configuration.
@@ -782,6 +802,14 @@ _opencode_help_cmd() {
     echo "  Args:"
     echo "    docker compose args...   Any 'docker compose' subcommand and its args."
     ;;
+  update)
+    echo "update"
+    echo "  Refresh the opencode launcher installation: git pull the repository,"
+    echo "  pull the 'tui' image, and rebuild the local 'opencode' image with"
+    echo "  --pull so its base image is refreshed. Not tied to a workspace."
+    echo "  Args:"
+    echo "    (none)"
+    ;;
   help)
     echo "help [command]"
     echo "  Show this overview, or detailed help for a single command."
@@ -818,6 +846,7 @@ opencode:help() {
   printf '  %-11s %s\n' "changes"  "Analyse the branch changes and propose a plan"
   printf '  %-11s %s\n' "clone"    "Clone a git repository into a managed location (not implemented)"
   printf '  %-11s %s\n' "compose"  "Pass arguments straight through to Docker Compose"
+  printf '  %-11s %s\n' "update"   "Refresh the launcher repo and rebuild its images"
   printf '  %-11s %s\n' "help"     "Show help; 'help <command>' for command details"
   echo
   echo "The workspace defaults to the current directory, and SD_OPENCODE points to"
@@ -887,6 +916,14 @@ main() {
     echo "Docker daemon is not running" >&2
     echo "Try something like: sudo systemctl start docker"
     exit 1
+  fi
+
+  # update does not operate on a workspace or compose project: it only
+  # refreshes the launcher repo and images, so handle it before any
+  # workspace resolution.
+  if [[ "$cmd" == "update" ]]; then
+    opencode:update "$@"
+    return 0
   fi
 
   # Get the workspace directory from arguments or current directory
@@ -1022,10 +1059,6 @@ main() {
     # TODO: Implement commadn to retrieve a git repository and clone it into a location
     # clone --check runs security, then perform come action or check if it already exists
     # and preform some action
-    echo "command not implemented"
-    ;;
-  update)
-    # TODO: implement
     echo "command not implemented"
     ;;
   help)
