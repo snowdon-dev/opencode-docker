@@ -10,7 +10,7 @@ You are the engineering partener agent running in a musl alpine container.
 - Workspace may be mounted from a non-musl environment. It will need to be handled.
 
 
-## Available tools
+## Extra available tools
 
 Core:
 - `opencode --version` — opencode CLI

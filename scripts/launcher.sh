@@ -10,6 +10,9 @@ declare -ga _cleanup_stack=()
 
 tmp_compose_dir=""
 tmp_compose_file=""
+_cleanup_scaffold_name=""
+_cleanup_scaffold_pid=""
+_cleanup_scaffold_output=""
 
 OPENCODE_ARGS=""
 
@@ -44,7 +47,7 @@ _print_git_context() {
     return
   fi
 
-  echo "Additional project context:
+  echo "\nAdditional project context:
 
 The author details for this task:
 Name: $(git config --global user.name)
@@ -61,7 +64,7 @@ _print_readme() {
   if [[ ! -f ./README.md ]]; then
     return
   fi
-  echo "README.md:
+  echo "\nREADME.md:
 \`\`\`
 $(cat README.md)
 \`\`\`"
@@ -262,6 +265,32 @@ _cleanup_opencode_backend() {
     opencode pkill -f 'opencode serve' || true
 }
 
+# Tear down an in-flight scaffold run: kill the compose client, force-remove the
+# one-off container, and delete the temp output file. docker compose run -T
+# cannot proxy Ctrl+C into the container (no TTY), and opencode run --auto
+# ignores SIGINT, so removal must be a forced one. Runs via the existing
+# INT/TERM/EXIT traps' cleanup stack; failures are surfaced, not swallowed.
+_cleanup_scaffold() {
+  if [[ -n "$_cleanup_scaffold_pid" ]]; then
+    kill -KILL "$_cleanup_scaffold_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$_cleanup_scaffold_name" ]]; then
+    if ! docker rm -f -v "$_cleanup_scaffold_name" >/dev/null 2>&1; then
+      # Name may be stale or docker busy: force-kill, retry, then report.
+      docker kill "$_cleanup_scaffold_name" >/dev/null 2>&1 || true
+      if ! docker rm -f "$_cleanup_scaffold_name" >/dev/null 2>&1; then
+        echo "WARNING: could not remove scaffold container $_cleanup_scaffold_name" >&2
+        echo "  run: docker rm -f $_cleanup_scaffold_name" >&2
+        docker ps -a --filter "name=oc-scaffold-" \
+          --format '  {{.ID}}  {{.Names}}  {{.Status}}' >&2 || true
+      fi
+    fi
+  fi
+  if [[ -n "$_cleanup_scaffold_output" ]]; then
+    rm -f -- "$_cleanup_scaffold_output"
+  fi
+}
+
 
 # Main function to start and run opencode in a Docker container
 # This function creates and executes the opencode container with proper
@@ -449,9 +478,7 @@ Workspace contents of /workspace:
 \`\`\`
 $(ls -la $ws)
 \`\`\`
-
 $(_print_readme)
-
 $(_print_git_context)
 </task-information>
 
@@ -463,9 +490,46 @@ Your task is as follows:
   # Allow users to specify custom agent definitions and model settings
   # for scaffold operations via environment variables or configuration files.
   
+  # The one-off container runs as a background job of the host launcher (the
+  # container itself still lives in the docker daemon). Its output is captured
+  # to a temp file so it can be streamed to the terminal, and on Ctrl+C the
+  # existing INT trap -> EXIT -> cleanup_add stack kills the compose client and
+  # the container instead of docker's (absent, with -T) signal proxy.
+  local cname="oc-scaffold-$$"
+  local outfile status offset size
+  outfile="$(mktemp "${TMPDIR:-/tmp}/opencode-scaffold.XXXXXX")" || return 1
+
+  _cleanup_scaffold_name="$cname"
+  _cleanup_scaffold_output="$outfile"
+  _cleanup_scaffold_pid=""
+  cleanup_add _cleanup_scaffold
+
   # Execute opencode with context information
-  printf '%s' "$task" | docker compose "${OPENCODE_ARGS[@]}" run --rm -T opencode \
-    'exec opencode run "$@"' opencode --auto "$tmp_context" "$@"
+  printf '%s' "$task" | docker compose "${OPENCODE_ARGS[@]}" run --rm -T --name "$cname" opencode \
+    'exec opencode run "$@"' opencode --auto "$tmp_context" "$@" >"$outfile" 2>&1 &
+  _cleanup_scaffold_pid=$!
+
+  # Stream the captured output to the terminal, then drain whatever is left.
+  # A plain `wait` would not run the INT trap until docker compose exits, so
+  # this poll loop keeps the shell responsive to the trap that kills it all.
+  offset=0
+  while kill -0 "$_cleanup_scaffold_pid" 2>/dev/null; do
+    size=$(wc -c <"$outfile")
+    if ((size > offset)); then
+      tail -c "+$((offset + 1))" "$outfile"
+      offset=$size
+    fi
+    sleep 0.2
+  done
+  size=$(wc -c <"$outfile")
+  if ((size > offset)); then
+    tail -c "+$((offset + 1))" "$outfile"
+  fi
+
+  wait "$_cleanup_scaffold_pid"
+  status=$?
+
+  return "$status"
 }
 
 # Remove existing opencode containers before starting.
@@ -830,76 +894,57 @@ main() {
 
   case "$cmd" in
   scaffold)
-    if [ -t 0 ]; then
-      # has no stdin, require task argument
-      if [[ $# -lt 2 ]]; then
-        echo "You did not provide a task to scaffold."
-        exit 1
-      fi
+    # require a task argument when stdin is a terminal (nothing can be piped in)
+    if [ -t 0 ] && [[ $# -lt 2 ]]; then
+      echo "You did not provide a task to scaffold." >&2
+      exit 1
     fi
 
-    # Handle scaffold command with directory validation and creation
     if [[ -z ${1+x} ]]; then
-      # Check if current directory is empty for scaffold operation
+      # No project name: the current directory must be empty.
       if [[ -n $(find "$ws_out" -mindepth 1 -print -quit) ]]; then
-        echo "$ws_out is not empty, scaffold failed" 
+        echo "$ws_out is not empty, scaffold failed" >&2
         exit 1
       fi
     else
-      # Process the provided project name
+      # Resolve the project name to an absolute workspace path.
       local name=$1
-
-      # If the name starts with ./ treat it as relative to the current directory
-      # instead of under the SD_REPO_HOME root.
       if [[ "$name" == ./ ]]; then
         # "./" alone means the current directory itself
         ws_out="$(pwd)"
       elif [[ "$name" == ./* ]]; then
-        name="${name#./}"
-        ws_out="$(pwd)/$name"
+        # relative to the current directory
+        ws_out="$(pwd)/${name#./}"
       elif [[ "$name" == /* ]]; then
-        ## if absolute
+        # absolute path
         ws_out="$name"
       else
+        # under the SD_REPO_HOME root
         ws_out="${SD_REPO_HOME:-/home/$USER/repos}/$name"
       fi
 
-      local tmp_ws_out="$ws_out"
+      # An absolute path is used as-is: no emptiness check, the caller owns it.
+      # Relative and repo-home paths must target a new or empty directory.
+      local check_empty=1
+      [[ "$name" == /* ]] && check_empty=0
 
-      if [[ -d "$name" ]]; then
-        # Check if the directory is empty
-        if [[ -n $(find "$name" -mindepth 1 -print -quit) ]]; then
-          echo "Exiting because of existing non-empty directory: $name"
+      if [[ -e "$ws_out" || -L "$ws_out" ]]; then
+        if [[ ! -d "$ws_out" ]]; then
+          echo "Path already exists but is not a directory: $ws_out" >&2
           exit 1
+        elif ((check_empty)) && [[ -n $(find "$ws_out" -mindepth 1 -print -quit) ]]; then
+          echo "$ws_out is not empty; scaffold failed" >&2
+          exit 1
+        elif ((check_empty)); then
+          echo "Using existing empty directory: $ws_out"
         else
-          echo "Using existing empty directory: $name"
+          echo "Using existing directory: $ws_out"
         fi
-
-        # Convert relative path to absolute path
-        ws_out=$(realpath -- "$name")
-      elif [[ -e "$name" || -L "$name" ]]; then
-        # Handle case where path exists but is not a directory
-        echo "Path already exists but is not a directory: $name" >&2
-        exit 1
-      elif [[ -e "$tmp_ws_out" || -L "$tmp_ws_out" ]]; then
-        # Handle case where path exists but is not a directory
-        echo "Path already exists but is not a directory: $tmp_ws_out" >&2
-        exit 1
-      elif [[ -d "$tmp_ws_out" ]]; then
-        # Check if temporary workspace directory is empty
-        if [[ -n $(find "$tmp_ws_out" -mindepth 1 -print -quit) ]]; then
-            echo "$tmp_ws_out is not empty; scaffold failed" >&2
-            exit 1
-        fi
-
-        echo "Using existing empty directory: $tmp_ws_out"
-        ws_out=$(realpath -- "$tmp_ws_out")
       else
-        # if the first is the path, and the second is the task
-        echo "Creating $tmp_ws_out"
-        mkdir -p -- "$tmp_ws_out" || exit 1
-        ws_out=$(realpath -- "$tmp_ws_out")
+        echo "Creating $ws_out"
+        mkdir -p -- "$ws_out" || exit 1
       fi
+      ws_out="$(realpath -- "$ws_out")"
     fi
     ;;
   esac
@@ -977,6 +1022,10 @@ main() {
     # TODO: Implement commadn to retrieve a git repository and clone it into a location
     # clone --check runs security, then perform come action or check if it already exists
     # and preform some action
+    echo "command not implemented"
+    ;;
+  update)
+    # TODO: implement
     echo "command not implemented"
     ;;
   help)

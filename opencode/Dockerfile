@@ -114,6 +114,8 @@ RUN gopls version \
 # Optional Rust environment
 # ------------------------------------------------------------
 
+# TODO: install the bins in a from stage, and copy into container
+
 # Rust lives in the user's home directory
 ENV PATH="/home/${USERNAME}/.cargo/bin:${PATH}"
 
