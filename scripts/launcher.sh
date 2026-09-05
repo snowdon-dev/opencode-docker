@@ -463,8 +463,6 @@ Your task is as follows:
   # Allow users to specify custom agent definitions and model settings
   # for scaffold operations via environment variables or configuration files.
   
-  # TODO: pass task via stdin
-
   # Execute opencode with context information
   printf '%s' "$task" | docker compose "${OPENCODE_ARGS[@]}" run --rm -T opencode \
     'exec opencode run "$@"' opencode --auto "$tmp_context" "$@"

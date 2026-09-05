@@ -1,0 +1,177 @@
+name: weekly opencode update & release
+
+on:
+  schedule:
+    #- cron: '0 13 * * *'  # Every 24 hours
+    - cron: '11 04 * * 0'
+  workflow_dispatch:
+
+concurrency:
+  group: opencode-update-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Get latest semantic version tag
+        id: latest_tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=$(
+            gh api --paginate "repos/${{ github.repository }}/tags?per_page=100" \
+              --jq '.[].name' |
+            grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' |
+            sort -V |
+            tail -n 1
+          )
+
+          if [ -z "$TAG" ]; then
+            echo "No semantic version tag found"
+            exit 1
+          fi
+
+          echo "Latest semantic version tag: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout latest tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.latest_tag.outputs.tag }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve Docker Hub image name
+        id: image
+        env:
+          DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
+        run: echo "image=${DOCKERHUB_IMAGE:-devsnowdon/opencode-docker}" >> "$GITHUB_OUTPUT"
+
+      - name: Get previous image opencode version
+        id: previous
+        run: |
+          IMAGE="${{ steps.image.outputs.image }}"
+
+          if ! docker pull "$IMAGE:latest" >/dev/null 2>&1; then
+            echo "No previous image found; assuming first build."
+            echo "version=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          VERSION="$(
+            docker inspect "$IMAGE:latest" \
+              --format '{{ index .Config.Labels "dev.snowdon.image.opencode.version" }}' \
+              2>/dev/null || true
+          )"
+          case "$VERSION" in
+            '' | '<no value>') VERSION="" ;;
+          esac
+
+          echo "OpenCode version: ${VERSION:-<none>}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Get latest OpenCode release versions
+        id: release
+        env:
+          PREVIOUS_IMAGE_VERSION: ${{ steps.previous.outputs.version }}
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { data } = await github.rest.repos.listReleases({
+              owner: 'anomalyco',
+              repo: 'opencode',
+              per_page: 3
+            });
+
+            const published = data.filter(r => !r.draft && !r.prerelease);
+            if (published.length < 2) {
+              core.setFailed('Could not find two published OpenCode releases');
+              return;
+            }
+
+            function parseVersion(version) {
+              const match = version.match(/^(\d+)\.(\d+)\.(\d+)$/);
+              if (!match) {
+                throw new Error(`Invalid semantic version: ${version}`);
+              }
+              return {
+                major: Number(match[1]),
+                minor: Number(match[2]),
+                patch: Number(match[3]),
+              };
+            }
+
+            const latest = published[0].tag_name.replace(/^v/, '');
+            const latestVersion = parseVersion(latest);
+
+            const imageVersion = process.env.PREVIOUS_IMAGE_VERSION || '';
+            let base = imageVersion;
+
+            // No previous image yet (first build): fall back to the
+            // second-newest release so the minor/patch decision still works.
+            if (!base) {
+              base = published[1].tag_name.replace(/^v/, '');
+            }
+
+            const baseVersion = parseVersion(base);
+
+            const isNewer =
+              latestVersion.major > baseVersion.major ||
+              (latestVersion.major === baseVersion.major &&
+               latestVersion.minor > baseVersion.minor) ||
+              (latestVersion.major === baseVersion.major &&
+               latestVersion.minor === baseVersion.minor &&
+               latestVersion.patch > baseVersion.patch);
+
+            const updated = !imageVersion || isNewer;
+
+            const bump = !updated
+              ? 'none'
+              : latestVersion.major !== baseVersion.major ||
+                latestVersion.minor !== baseVersion.minor
+                ? 'minor'
+                : 'patch';
+
+            core.info(`Image OpenCode version: ${imageVersion || '<none>'}`);
+            core.info(`Bump base:              ${base}`);
+            core.info(`Latest OpenCode:        ${latest}`);
+            core.info(`Updated:                ${updated}`);
+            core.info(`Required bump:          ${bump}`);
+
+            core.setOutput('latest', latest);
+            core.setOutput('major', latestVersion.major);
+            core.setOutput('bump', bump);
+            core.setOutput('updated', String(updated));
+
+      - name: Exit if opencode has not been updated
+        run: |
+          LATEST_VERSION=${{ steps.release.outputs.latest }}
+          if [ "${{ steps.release.outputs.updated }}" = "false" ]; then
+            echo "OpenCode has not been updated ($LATEST_VERSION); nothing to do."
+            exit 0
+          fi
+          echo "OpenCode has been updated ($LATEST_VERSION)."
+
+      - name: Failed if something might break
+        run: |
+          MAJOR=${{ steps.release.outputs.major }}
+          if [ "$MAJOR" != "1" ]; then
+            exit 1
+          fi
+
+      - name: Install svu
+        run: |
+          go install github.com/caarlos0/svu@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Tag minor
+        if: steps.release.outputs.bump == 'minor'
+        run: make tag-minor
+
+      - name: Tag patch
+        if: steps.release.outputs.bump == 'patch'
+        run: make tag-patch
