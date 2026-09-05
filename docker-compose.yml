@@ -50,4 +50,5 @@ services:
     tty: true
     labels:
       - "dev.snowdon.opencode.managed=true"
+      - "dev.snowdon.opencode.tui=true"
       - "dev.snowdon.opencode.workspace=${WORKSPACE}"

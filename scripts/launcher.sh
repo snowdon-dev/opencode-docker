@@ -3,6 +3,7 @@
 SD_OPENCODE="${SD_OPENCODE:-$HOME/opencode}"
 MANAGE_LABEL="dev.snowdon.opencode.managed"
 WORKSPACE_LABEL="dev.snowdon.opencode.workspace"
+TUI_LABEL="dev.snowdon.opencode.tui"
 IMAGE_URL="${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker}"
 LOOPBACK="127.0.0.1"
 
@@ -235,9 +236,35 @@ _backend_healthy() {
     "$BACKEND_HEALTH_URL" >/dev/null 2>&1
 }
 
+# List managed containers. By default oneoff (throwaway `compose run`) containers
+# are skipped; pass --all to include them. An optional workspace argument scopes
+# the results to containers labelled for that workspace.
 _find_docker_managed() {
-  docker ps -q \
-    --filter "label=$MANAGE_LABEL=true" 2>/dev/null
+  local include_oneoff=0
+  local ws_filter=""
+  for arg in "$@"; do
+    case "$arg" in
+      --all) include_oneoff=1 ;;
+      *) ws_filter="$arg" ;;
+    esac
+  done
+  local id oneoff
+  docker ps -a -q \
+    --filter "label=$MANAGE_LABEL=true" \
+    ${ws_filter:+--filter "label=$WORKSPACE_LABEL=$ws_filter"} 2>/dev/null | while read -r id; do
+    if [ "$include_oneoff" -eq 0 ]; then
+      oneoff=$(docker inspect \
+        --format '{{ index .Config.Labels "com.docker.compose.oneoff" }}' \
+        "$id" 2>/dev/null)
+      istui=$(docker inspect \
+        --format "{{ index .Config.Labels \"$TUI_LABEL\" }}" \
+        "$id" 2>/dev/null)
+      if [ "$oneoff" = "True" ] && [ "$istui" != "true" ]; then
+        continue
+      fi
+    fi
+    printf '%s\n' "$id"
+  done
 }
 
 _find_workspace() {
@@ -306,20 +333,13 @@ opencode() {
   while read -r conflict_id; do
     [[ -z "$conflict_id" ]] && continue
 
-    oneoff=$(docker inspect \
-      --format '{{ index .Config.Labels "com.docker.compose.oneoff" }}' \
-      "$conflict_id" 2>/dev/null)
-    if [ "$oneoff" = "True" ]; then
-      continue
-    fi
-
     # Use docker inspect, not docker ps --format: .Config.Labels is always a
     # map, whereas .Labels from 'ps --format' can surface as a slice (indexing
     # a slice by string then fails), depending on the docker/compose build.
     conflict_ws="$(_find_workspace $conflict_id)"
     if [[ -n "$conflict_ws" && "$conflict_ws" != "$ws" ]]; then
       echo "Container already running for workspace $conflict_ws." >&2
-      echo "Run 'opencode:stop $conflict_ws' first, or use 'opencode:new' to" >&2
+      echo "Run 'opencode:down $conflict_ws' first, or use 'opencode:new' to" >&2
       echo "automatically remove the existing container." >&2
       exit 1
     fi
@@ -351,12 +371,17 @@ opencode() {
         echo 'It may be a delayed start'
         exit 1
       fi
+
+      if (( i % 3 == 0 )); then
+        printf '.'
+      fi
       
       sleep 0.2
     done
+    printf "\n"
   fi
 
-  echo 'Backend ready. Attaching...'
+  echo "Backend ready. Attaching..."
 
   # attach a host TUI and wait. on exit kill
   _run_opencode_executable "$@"
@@ -439,11 +464,16 @@ opencode:update() {
   )
 }
 
-# Stop all managed opencode containers for the specified project
-# This function stops managed containers and cleans up resources
-# while preserving the workspace configuration.
-opencode:stop() {
+# Teardown the opencode project for the specified workspace.
+# Removes the compose resources (containers, networks, volumes) with 'down',
+# then stops any remaining managed containers (e.g. the TUI one-off) scoped to
+# the workspace, while preserving the workspace configuration.
+opencode:down() {
   echo "Stopping opencode project: $proj ($ws)"
+  # docker compose down does not remove one-off containers created via
+  # 'compose run' (like the TUI). Stop any remaining managed containers
+  # scoped to this workspace.
+  opencode:stop "$ws"
 
   # Stop and remove containers, networks, and volumes
   docker compose "${OPENCODE_ARGS[@]}" down
@@ -556,15 +586,30 @@ Your task is as follows:
 # This resolves port-binding conflicts when multiple managed containers
 # (labelled dev.snowdon.opencode.managed=true) cannot share the same port.
 opencode:new() {
-  opencode:end 
+  opencode:stop 
 
   echo "Starting fresh opencode container for project: $proj"
   opencode "$@"
 }
 
 # Stops the existing managed containers
-opencode:end() {
+# Pass --all to include oneoff (throwaway `compose run`) containers.
+# An optional workspace argument scopes the stop to containers for that
+# workspace; by default all workspaces are stopped.
+opencode:stop() {
   echo "Stopping existing opencode containers for project: $proj ($ws)"
+
+  local all=0
+  for arg in "$@"; do
+    [ "$arg" = "--all" ] && all=1
+  done
+
+  # First positional argument is the workspace to scope to; empty = all
+  # workspaces.
+  local ws_scope=""
+  if [[ -n "${1:-}" && "${1:-}" != "--all" ]]; then
+    ws_scope="$1"
+  fi
 
   # Inspect managed containers and their workspace labels to warn about
   # conflicts before stopping them
@@ -577,15 +622,30 @@ opencode:end() {
       echo "Stopping managed container $id"
     fi
     docker stop "$id"
-  done < <(_find_docker_managed)
+  done < <(_find_docker_managed ${ws_scope:+$ws_scope} $([ "$all" -eq 1 ] && echo --all))
 }
 
 # Force-remove all managed opencode containers.
-# Unlike 'end' which gracefully stops containers, this immediately removes
+# Unlike 'stop' which gracefully stops containers, this immediately removes
 # them using 'docker rm -f', which is useful when a container is stuck or
 # when you need to fully clean up.
+# Pass --all to include oneoff (throwaway `compose run`) containers.
+# An optional workspace argument scopes the delete to containers for that
+# workspace; by default all workspaces are removed.
 opencode:delete() {
-  echo "Force-removing existing opencode containers for project: $proj ($ws)"
+  echo "Force-removing all opencode containers"
+
+  local all=0
+  for arg in "$@"; do
+    [ "$arg" = "--all" ] && all=1
+  done
+
+  # First positional argument is the workspace to scope to; empty = all
+  # workspaces.
+  local ws_scope=""
+  if [[ -n "${1:-}" && "${1:-}" != "--all" ]]; then
+    ws_scope="$1"
+  fi
 
   while read -r id; do
     [[ -z "$id" ]] && continue
@@ -596,7 +656,7 @@ opencode:delete() {
       echo "Force-removing managed container $id"
     fi
     docker rm -f "$id"
-  done < <(_find_docker_managed)
+  done < <(_find_docker_managed ${ws_scope:+$ws_scope} $([ "$all" -eq 1 ] && echo --all))
 }
 
 # Analyze the workspace branch changes with a non-interactive opencode run.
@@ -718,19 +778,20 @@ _opencode_help_cmd() {
     echo "  Args:"
     echo "    command...   The setup command (and its args) to run."
     ;;
-  stop)
-    echo "stop"
-    echo "  Gracefully stop opencode containers, networks, and volumes for this project,"
+down)
+    echo "down"
+    echo "  Remove the project's compose resources (containers, networks, volumes) and"
+    echo "  stop any remaining managed containers (e.g. the TUI) for this workspace,"
     echo "  preserving the workspace configuration."
     echo "  Args:"
     echo "    (none)"
     ;;
   delete)
-    echo "delete"
+    echo "delete [--all]"
     echo "  Force-remove all managed opencode containers across workspaces using"
     echo "  'docker rm -f'. Immediately removes stuck or unwanted containers."
     echo "  Args:"
-    echo "    (none)"
+    echo "    --all   Also remove oneoff (throwaway 'compose run') containers."
     ;;
   exec)
     echo "exec [command...]"
@@ -738,12 +799,12 @@ _opencode_help_cmd() {
     echo "  Args:"
     echo "    command...   The command (and its args) to run inside the container."
     ;;
-  end)
-    echo "end"
-    echo "  Stop all managed opencode containers across workspaces. This stops"
-    echo "  containers labelled as managed, freeing their ports."
+  stop)
+    echo "stop [--all]"
+    echo "  Gracefully stop the managed opencode containers across all workspaces,"
+    echo "  freeing their ports. 'down' scopes this to the current workspace."
     echo "  Args:"
-    echo "    (none)"
+    echo "    --all   Also stop oneoff (throwaway 'compose run') containers."
     ;;
   run)
     echo "run [command...]"
@@ -835,10 +896,10 @@ opencode:help() {
   printf '  %-11s %s\n' "new"      "Remove conflicting containers and start a fresh session"
   printf '  %-11s %s\n' "up"       "Start the container in the background without running a process"
   printf '  %-11s %s\n' "setup"    "Run setup commands against the persisted instance"
-  printf '  %-11s %s\n' "stop"     "Stop and remove the project's containers, networks, and volumes"
-  printf '  %-11s %s\n' "delete"   "Force-remove all managed opencode containers across workspaces"
+  printf '  %-11s %s\n' "down"     "Remove the project's containers, networks, volumes, and TUI"
+  printf '  %-11s %s\n' "delete"   "Force-remove all managed opencode containers across workspaces (--all for oneoffs)"
   printf '  %-11s %s\n' "exec"     "Run a command interactively inside the running container"
-  printf '  %-11s %s\n' "end"      "Stop all managed opencode containers across workspaces"
+  printf '  %-11s %s\n' "stop"     "Stop the managed opencode containers across all workspaces (--all for oneoffs)"
   printf '  %-11s %s\n' "run"      "Run a one-off non-interactive task in the service"
   printf '  %-11s %s\n' "shell"    "Open an interactive shell inside the running container"
   printf '  %-11s %s\n' "scaffold" "Create a new opencode project with a fresh git repo"
@@ -1005,8 +1066,8 @@ main() {
   
   # Dispatch to the appropriate command handler
   case "$cmd" in
-  stop)
-    _opencode_ctx opencode:stop "$ws" "$proj" "$@"
+  down)
+    _opencode_ctx opencode:down "$ws" "$proj" "$@"
     ;;
   start)
     _opencode_ctx opencode "$ws" "$proj" "$@"
@@ -1039,11 +1100,11 @@ main() {
     # Remove existing containers before starting a fresh instance
     _opencode_ctx opencode:new "$ws" "$proj" "$@"
     ;;
-  end)
-    opencode:end "$ws" "$proj" "$@"
+  stop)
+    opencode:stop "$@"
     ;;
   delete)
-    opencode:delete "$ws" "$proj" "$@"
+    opencode:delete "$@"
     ;;
   changes)
     # Analyze branch changes for the workspace

@@ -126,10 +126,12 @@ $CBASE up -d opencode"
 }
 
 t_stop() {
+  # stop: discovers managed containers via _find_docker_managed (all
+  # workspaces by default), stops each.
   run_launcher /dev/null stop
-  assert_docker "$DINFO
-$CBASE down"
-  assert_launcher_output_contains "Stopping opencode project: ws"
+  assert_docker_contains "docker ps -q --filter label=dev.snowdon.opencode.managed=true"
+  assert_docker_contains "docker stop c1"
+  assert_launcher_output_contains "Stopping existing opencode containers for project: ws"
 }
 
 t_exec() {
@@ -192,7 +194,7 @@ t_start_conflict() {
   # a new container, telling the user how to free the workspace.
   OPENCODE_TEST_CONFLICT=1 run_launcher /dev/null start --model gpt
   assert_launcher_output_contains "Container already running for workspace /workspace/other."
-  assert_launcher_output_contains "opencode:stop /workspace/other"
+  assert_launcher_output_contains "opencode:down /workspace/other"
   # Must NOT have attempted to create the container (no compose up/exec/attach).
   if grep -Fq "up -d" <<<"$DOCKER_LOG"; then
     FAIL=$((FAIL+1)); FAILED_TESTS+=("$CURRENT:should_not_create")
@@ -203,7 +205,7 @@ t_start_conflict() {
 }
 
 t_new() {
-  # new: opencode:end (find + stop managed containers) then opencode (full
+  # new: opencode:stop (find + stop all managed containers) then opencode (full
   # start sequence: conflict check, ensure_up, attach, verify).
   run_launcher /dev/null new "do something"
   assert_docker_contains "docker ps -q --filter label=dev.snowdon.opencode.managed=true"
@@ -220,12 +222,14 @@ t_shell() {
 $CBASE exec -it opencode sh -c echo hi"
 }
 
-t_end() {
-  # end: discovers managed containers via _find_docker_managed, stops each.
-  run_launcher /dev/null end
+t_down() {
+  # down: compose down clears the project's networks/volumes, then stop is
+  # called workspace-scoped to catch any remaining managed containers (TUI).
+  run_launcher /dev/null down
+  assert_docker_contains "$CBASE down"
   assert_docker_contains "docker ps -q --filter label=dev.snowdon.opencode.managed=true"
   assert_docker_contains "docker stop c1"
-  assert_launcher_output_contains "Stopping existing opencode containers for project: ws"
+  assert_launcher_output_contains "Stopping opencode project: ws"
 }
 
 t_delete() {
@@ -272,7 +276,7 @@ t_help() {
   run_launcher /dev/null help
   assert_launcher_output_contains "opencode launcher - manage the opencode container and sessions"
   assert_launcher_output_contains "Commands:"
-  for cmd in start new up setup stop delete exec end run shell scaffold changes compose help; do
+  for cmd in start new up setup stop delete exec down run shell scaffold changes compose help; do
     assert_launcher_output_contains "$cmd"
   done
 }

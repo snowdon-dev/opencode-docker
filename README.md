@@ -24,9 +24,11 @@ opencode:new
 opencode:run "npm install"
 opencode:up
 opencode:setup "npm install"
+opencode:down
 opencode:stop
-opencode:end
+opencode:stop --all
 opencode:delete
+opencode:delete --all
 opencode:exec sh
 opencode:shell
 opencode:compose exec -it opencode sh
@@ -37,7 +39,7 @@ opencode:scaffold /tmp/project < /tmp/sometask.md
 opencode -c --auto
 opencode /home/other/somerepo
 opencode:exec /home/other/somerepo sh
-opencode:stop /home/other/somerepo
+opencode:down /home/other/somerepo
 opencode:scaffold /home/pi/repos/gists/project-1 "Create basic hello world html project"
 opencode:scaffold gists/project-1 "Create basic hello world html project"
 opencode:scaffold project-2 "$(cat /tmp/sometask.md)"
@@ -117,7 +119,7 @@ backend is killed when the TUI exits.
 Instead of running the compose directly, install as an omz plugin for handy commands.
 
 `omz/opencode.zsh` provides shell aliases (`opencode`, `oc`, `oc:s`,
-`oc:u`, `oc:e`, `oc:c`, ...) wrapping the launcher. It also defines
+`oc:u`, `oc:d`, `oc:del`, `oc:c`, ...) wrapping the launcher. It also defines
 `opencode:update` (alias `oc:u`), which pulls the base image and rebuilds the
 local image layered on top of it. Link it as an oh-my-zsh custom plugin:
 
@@ -343,7 +345,7 @@ removes it afterwards:
 
 ```sh
 make test                 # run the whole suite
-./tests/run_tests.sh up   # run a single test by name (stop, exec, run, ...)
+./tests/run_tests.sh up   # run a single test by name (down, stop, exec, run, ...)
 ```
 
 To see exactly which docker commands the launcher would issue for a given
