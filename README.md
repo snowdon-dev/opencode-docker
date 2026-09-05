@@ -10,7 +10,7 @@ that runs in a Docker container. The current project bind-mounted at
 `/workspace`, plus persistent caches for full language toolchains installed in
 the image (Go, Rust, Node, Python).
 
-This project has been desgined for arm archetecture devices like the [Raspberry
+This project has been designed for arm architecture devices like the [Raspberry
 Pi](https://www.raspberrypi.com/). However, it should be compatible with x86.
 
 The version of opencode is best-effort and updated periodically, feel free to
@@ -52,7 +52,7 @@ OPENCODE_NETWORK="custom-network" opencode
 
 # start the container already ready to go
 cd ~/project
-opencode:setup "npm intsall" && opencode
+opencode:setup "npm install" && opencode
 ```
 
 ## Features
@@ -64,14 +64,14 @@ opencode:setup "npm intsall" && opencode
 - [ ] Security: Auto update. Pin tools to any security updates. Github workflow
 - [x] [Docker](https://www.docker.com/) base container for opencode work
 - [x] Convenience launcher script
-- [x] [ohmyzsh](https://github.com/ohmyzsh/ohmyzsh/wiki/Customization) plugin abillity
+- [x] [ohmyzsh](https://github.com/ohmyzsh/ohmyzsh/wiki/Customization) plugin ability
 - [x] [Add github build - docker step by step guide](https://docs.docker.com/guides/gha/)
 - [x] Prevent large arguments leaks and enable task via std
 - [x] Allow easy mounting of the config dir
 - [ ] Layered containers - full(rust, go, c, node, python) - duck(node, python) - empty.
 - [ ] Layered containers - [development containers spec](https://containers.dev/implementors/spec/)
 - [ ] Layered containers - In the docker compose, use build. and add a docker that uses FROM image-full
-- [ ] Fix: Allow multiple port bindings to enable multiple running agents on mulitple projects
+- [ ] Fix: Allow multiple port bindings to enable multiple running agents on multiple projects
 - [ ] Project creation with scaffold extra context
 
 ## Install
@@ -98,7 +98,9 @@ after a new release.
 
 ## Container Usage
 
-You should use the opencode launcher utility to launch the container. As it needs environment variables to (like WORKSPACE) init properly. See oh-my-zsh plugin.
+You should use the opencode launcher utility to launch the container, as it
+needs environment variables (like WORKSPACE) to init properly. See the
+[oh-my-zsh](#oh-my-zsh) plugin.
 
 ```sh
 docker compose up -d opencode
@@ -113,7 +115,7 @@ backend is killed when the TUI exits.
 
 ## oh-my-zsh plugin
 
-Instead of running the compose directly, install as a omz plugin for handy commands.
+Instead of running the compose directly, install as an omz plugin for handy commands.
 
 `omz/opencode.zsh` provides shell aliases (`opencode`, `oc`, `oc:s`,
 `oc:u`, `oc:e`, `oc:c`, ...) wrapping the launcher. It also defines
@@ -135,7 +137,7 @@ export SD_REPO_HOME="$HOME/repos"
 plugins=(... opencode)
 ```
 
-After restarting your shell (`exec zsh`). View the avaliable commands by
+After restarting your shell (`exec zsh`). View the available commands by
 running `alias | grep -E ^oc` or `alias | grep opencode`. Then try running
 `opencode:help` to see the full help information.
 
@@ -369,9 +371,9 @@ change per request.
 - The compose file bind-mounts the host config directory
   (`OPENCODE_CONFIG_DIR`, default `$HOME/.config/opencode`) at
   `/home/other/.config`, and mounts this repository's `opencode/agent.md`
-  read-only over the container's AGENTS.md
-  (`/home/other/.config/opencode/AGENTS.md`). Edit the file to customise the
-  system prompt the agents run under.
+read-only over the container's AGENTS.md
+   (`/home/other/.config/opencode/AGENTS.md`). Edit the file to customize the
+   system prompt the agents run under.
 
 ### Start extending with custom functions
 
