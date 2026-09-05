@@ -242,14 +242,16 @@ _backend_healthy() {
 _find_docker_managed() {
   local include_oneoff=0
   local ws_filter=""
+  local stopped=""
   for arg in "$@"; do
     case "$arg" in
       --all) include_oneoff=1 ;;
+      --stopped) stopped="-a" ;;
       *) ws_filter="$arg" ;;
     esac
   done
-  local id oneoff
-  docker ps -a -q \
+  local id oneoff istui
+  docker ps -q $stopped \
     --filter "label=$MANAGE_LABEL=true" \
     ${ws_filter:+--filter "label=$WORKSPACE_LABEL=$ws_filter"} 2>/dev/null | while read -r id; do
     if [ "$include_oneoff" -eq 0 ]; then
@@ -274,7 +276,7 @@ _find_workspace() {
 }
 
 _run_opencode_executable() {
-  if command -v opencode >/dev/null 2>&1; then 
+  if command which opencode >/dev/null 2>&1; then 
     local BACKEND_ORIGIN="${OPENCODE_BACKEND_ORIGIN:-http://$LOOPBACK:4096}"
     echo "Using opencode tui $(command which opencode)"
     command opencode attach "$BACKEND_ORIGIN" "$@"
@@ -656,7 +658,7 @@ opencode:delete() {
       echo "Force-removing managed container $id"
     fi
     docker rm -f "$id"
-  done < <(_find_docker_managed ${ws_scope:+$ws_scope} $([ "$all" -eq 1 ] && echo --all))
+  done < <(_find_docker_managed --stopped ${ws_scope:+$ws_scope} $([ "$all" -eq 1 ] && echo --all))
 }
 
 # Analyze the workspace branch changes with a non-interactive opencode run.
