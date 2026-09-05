@@ -364,6 +364,8 @@ main() {
     echo
     echo "--- ${CURRENT} ---"
     "$test_fn"
+    rm -rf -- "$SD"
+    SD=""
   done
 
   echo

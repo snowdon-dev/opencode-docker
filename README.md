@@ -330,12 +330,17 @@ Pushing a `v*` tag triggers the CI build (see below).
 
 ## Testing
 
-The launcher has a small unit-test suite that runs it against a **mocked
-`docker`** binary (`tests/mockbin/docker`), so no Docker daemon is required.
+The launcher has a small unit-test suite that runs it against **mocked**
+binaries (`tests/mockbin/`) — `docker`, `curl`, and `opencode` — so no Docker
+daemon is required.
 
-Instead of executing anything, the mock records the exact `docker ...` command
-each subcommand would run. The tests (`tests/run_tests.sh`) assert those invoked
-commands:
+Instead of executing anything, the mock `docker` records the exact `docker ...`
+command each subcommand would run. The tests (`tests/run_tests.sh`) assert those
+invoked commands. The mock `curl` lets the backend health-check path succeed
+(used by `start`), and the mock `opencode` captures the attach invocation.
+
+Each test builds a throwaway sandbox under `/tmp` (never inside the repo) and
+removes it afterwards:
 
 ```sh
 make test                 # run the whole suite
