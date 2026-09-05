@@ -41,7 +41,7 @@ _cleanup() {
 
 # print a message about the current git details of the cwd
 _print_git_context() {
-  if ! which git > /dev/null; then
+  if command -v git &>/dev/null; then
     return
   fi
   if [[ ! -d .git ]]; then
@@ -274,7 +274,7 @@ _find_workspace() {
 }
 
 _run_opencode_executable() {
-  if command which opencode > /dev/null 2>&1; then
+  if command -v opencode >/dev/null 2>&1; then 
     local BACKEND_ORIGIN="${OPENCODE_BACKEND_ORIGIN:-http://$LOOPBACK:4096}"
     echo "Using opencode tui $(command which opencode)"
     command opencode attach "$BACKEND_ORIGIN" "$@"
@@ -944,7 +944,7 @@ opencode:help() {
 
   echo "Git location:       $SD_OPENCODE"
 
-  if which git; then
+  if command -v git &>/dev/null; then
     local tags="$(git -C "$SD_OPENCODE" describe --tags --exact-match 2>/dev/null || echo unknown)"
     local commit="$(git -C "$SD_OPENCODE" rev-parse --short HEAD 2>/dev/null || echo unknown)"
     # Get the current git location from ~/opencode
