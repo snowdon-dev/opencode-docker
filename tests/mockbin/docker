@@ -51,10 +51,9 @@ if [[ "$1" == "compose" ]]; then
       echo "mocked-container-id"
       ;;
     exec)
-      # remaining args ... opencode <cmd> [args]
-      # consume flags, then skip the service name (opencode), then shell words
-      while [[ $# -gt 0 && "$1" != opencode ]]; do shift; done
-      [[ "$1" == "opencode" ]] && shift
+      # Skip flags, then skip service name, then handle remaining command.
+      while [[ $# -gt 0 && "$1" == -* ]]; do shift; done
+      [[ $# -gt 0 ]] && shift
       # If the remaining words begin with sh -c <body>, echo the body back so
       # the launcher's command substitution capture works.
       if [[ "${1:-}" == "sh" && "${2:-}" == "-c" ]]; then
@@ -67,8 +66,8 @@ if [[ "$1" == "compose" ]]; then
       # Mirrors exec: after consuming flags/service, if the remaining words
       # begin with sh -c <body>, echo the body back so command-substitution
       # capture works for the one-off (compose run) path too.
-      while [[ $# -gt 0 && "$1" != opencode ]]; do shift; done
-      [[ "$1" == "opencode" ]] && shift
+      while [[ $# -gt 0 && "$1" == -* ]]; do shift; done
+      [[ $# -gt 0 ]] && shift
       if [[ "${1:-}" == "sh" && "${2:-}" == "-c" ]]; then
         printf '%s\n' "${3:-}"
       else
@@ -85,7 +84,7 @@ elif [[ "$1" == "ps" ]]; then
   # container id is printed (used by conflict detection), otherwise the old
   # "<id>\t<workspace>" form. With OPENCODE_TEST_CONFLICT=1, report a
   # *different* workspace so the launcher aborts with a conflict message.
-  local quiet=0
+  quiet=0
   for a in "$@"; do [[ "$a" == "-q" ]] && quiet=1; done
   if [[ "$quiet" == "1" ]]; then
     echo "c1"
@@ -99,7 +98,7 @@ elif [[ "$1" == "inspect" ]]; then
   # Return the workspace value from the container's Config.Labels. The label is
   # only rendered (non-empty) when not in conflict mode, so conflict detection
   # can see the differing workspace.
-  local f=""
+  f=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --format) f="$2"; shift 2 ;;

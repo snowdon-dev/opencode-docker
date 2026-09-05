@@ -454,10 +454,10 @@ opencode:scaffold() {
     task=$1
     shift 1
   elif [[ ! -t 0 ]]; then
-      task=$(cat)
+    task=$(cat)
   else
-      echo "error: no task provided" >&2
-      exit 1
+    echo "error: no task provided" >&2
+    exit 1
   fi
 
   echo "Running on opencode project: $proj ($ws)"
@@ -606,7 +606,7 @@ opencode:changes() {
         if [ "$total_added" -gt 500 ]; then
           git diff --stat "$upstream"...HEAD
           git diff --stat --cached
-          git diff
+          git diff --stat
         else
           # Show all changes: committed + staged + unstaged
           git diff "$upstream"...HEAD

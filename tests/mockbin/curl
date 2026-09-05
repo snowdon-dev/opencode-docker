@@ -1,0 +1,4 @@
+#!/bin/bash
+# Mock curl for launcher tests. Always succeeds so the backend health check
+# passes and the start command can proceed past the wait loop.
+exit 0

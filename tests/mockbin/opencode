@@ -1,0 +1,19 @@
+#!/bin/bash
+# Mock opencode CLI for launcher tests. Since MOCKBIN is prepended to PATH,
+# `command which opencode` inside the launcher finds this instead of any real
+# opencode build, so `_run_opencode_executable` deterministically exercises the
+# in-container tui path... no wait, it exercises the "local opencode" branch
+# (which runs opencode attach against the backend). We record the invocation to
+# the docker log so tests can assert it, then exit immediately so the launcher
+# proceeds to its post-run container verification.
+set -u
+
+OPENCODE_TEST_DOCKER_LOG="${OPENCODE_TEST_DOCKER_LOG:-}"
+
+if [[ -n "$OPENCODE_TEST_DOCKER_LOG" ]]; then
+  printf 'opencode %s\n' "$*" >>"$OPENCODE_TEST_DOCKER_LOG"
+else
+  printf 'MOCK OPENCODE: %s\n' "$*"
+fi
+
+exit 0
