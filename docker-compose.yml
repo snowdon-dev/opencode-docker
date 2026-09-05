@@ -2,7 +2,12 @@ services:
   opencode:
     cpuset: "${OPENCODE_CPUSET:-2-3}"
     #image: ghcr.io/anomalyco/opencode:1.14.47
-    image: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker}
+    #image: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        OPENCODE_IMAGE_URL: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker}
     # restart: unless-stopped
     entrypoint: ["/bin/sh", "-c"]
     command:
@@ -11,12 +16,14 @@ services:
       - "dev.snowdon.opencode.managed=true"
       - "dev.snowdon.opencode.workspace=${WORKSPACE}"
     volumes:
-      - ${WORKSPACE:-.}:/workspace
+      - ${WORKSPACE:-${SD_OPENCODE}}:/workspace
       - /etc/localtime:/etc/localtime:ro
 
       # opencode
       - ${OPENCODE_CACHE_DIR:-${HOME}/.cache/opencode/cache}:/home/other/.cache/opencode/cache
       - ${OPENCODE_DATA_DIR:-${HOME}/.local/share/opencode}:/home/other/.local/share/opencode
+      - ${OPENCODE_CONFIG_DIR:-${HOME}/.config/opencode:/home/other/.config
+      - ./opencode/agent.md:/home/other/.config/opencode/AGENTS.md:ro
 
       # python
       - ${OPENCODE_PIP_CACHE_DIR:-${HOME}/.cache/pip}:/home/other/.cache/pip

@@ -5,12 +5,18 @@
 [![Docker Image Size](https://img.shields.io/docker/image-size/devsnowdon/opencode-docker)](https://hub.docker.com/r/devsnowdon/opencode-docker)
 [![.github/workflows/build-push.yaml](https://github.com/snowdon-dev/opencode-docker/actions/workflows/build-push.yaml/badge.svg)](https://github.com/snowdon-dev/opencode-docker/actions/workflows/build-push.yaml)
 
-Runs [opencode](https://opencode.ai) in a Docker container with the current
-project bind-mounted at `/workspace`, plus persistent caches for the language
-toolchains installed in the image (Go, Rust, Node, Python).
+A security and human-control oriented [opencode](https://opencode.ai) workflow
+that runs in a Docker container. The current project bind-mounted at
+`/workspace`, plus persistent caches for full language toolchains installed in
+the image (Go, Rust, Node, Python).
 
 This project has been desgined for arm archetecture devices like the [Raspberry
 Pi](https://www.raspberrypi.com/). However, it should be compatible with x86.
+
+The version of opencode is best-effort and updated periodically, feel free to
+file an issue if it is out-of-date. See [Build](#build) section.
+
+## Usage
 
 ```shell
 opencode:help
@@ -24,6 +30,7 @@ opencode:exec sh
 opencode:compose exec -it opencode sh
 opencode:changes "identify issues in these changes"
 opencode:scaffold path "the task"
+opencode:scaffold /tmp/project < /tmp/sometask.md
 
 opencode -c --auto
 opencode /home/other/somerepo
@@ -40,21 +47,28 @@ oc:sf ./newmodule "Create a golang package that exports a function that adds int
 OPENCODE_IMAGE_URL="my-custom-image" opencode
 OPENCODE_NETWORK="custom-network" opencode
 
+# start the container already ready to go
+cd ~/project
+opencode:setup "npm intsall" && opencode
 ```
 
+## Features
 
+- [x] Security: Prevent potential destructive actions by the agent
+- [x] Security: Configure project isolated cache storage via environment variables
+- [ ] Security: Add project specific OPENCODE_DATA_DIR and cache via argument flags
+- [ ] Security: Argument based worktree helpers to isolate node_modules or mount a tmp_dir
+- [ ] Security: Auto update. Pin tools to any security updates. Github workflow
 - [x] [Docker](https://www.docker.com/) base container for opencode work
 - [x] Convenience launcher script
-- [x] Security: prevent potential destructive actions by the agent
 - [x] [ohmyzsh](https://github.com/ohmyzsh/ohmyzsh/wiki/Customization) plugin abillity
-- [x] Security: configure project isolated cache storage via environment variables
-- [ ] Security: Add project specific OPENCODE_DATA_DIR
 - [x] [Add github build - docker step by step guide](https://docs.docker.com/guides/gha/)
-- [ ] Build containers full(rust, go, c, node, python) - duck(node, python) - empty.
-- [ ] In the docker compose, use build . and add a docker that uses FROM image-full
+- [x] Prevent large arguments leaks and enable task via std
+- [ ] Allow easy mounting of the config dir
+- [ ] Layered containers - full(rust, go, c, node, python) - duck(node, python) - empty.
+- [ ] Layered containers - [development containers spec](https://containers.dev/implementors/spec/)
+- [ ] Layered containers - In the docker compose, use build. and add a docker that uses FROM image-full
 - [ ] Fix: Allow multiple port bindings to enable multiple running agents on mulitple projects
-- [ ] Security: worktree helpers to isolate node_modules or mount a tmp_dir
-- [ ] Image extensions - use environment variable to extend from the base - or [development containers spec](https://containers.dev/implementors/spec/)
 - [ ] Project creation with scaffold extra context
 
 ## Install
@@ -115,8 +129,56 @@ running `alias | grep -E ^oc` or `alias | grep opencode`. Then try running
 - If not otherwise specified the environment default will only use 2 cpus.
 - An environment `SD_REPO_HOME` variable sets the root location used when
   building non-absolute paths in the scaffold command.
-- The opencode binary is also required in the shell path to run the TUI `npm i -g opencode-ao`
+- The opencode binary from the shell path to run the TUI (`npm i -g opencode-ao`) if one exists.
 - Docker is required [docker.io](https://www.docker.com/)
+
+### Creating the directories
+
+The container runs as the `other` user (uid/gid `1000`), so every host
+directory bind-mounted under `/home/other/...` (see
+[`docker-compose.yml`](docker-compose.yml)) must exist and be writable by that
+user. With default paths, create them like this:
+
+```sh
+mkdir -p \
+  "$HOME/.cache/opencode/cache" \
+  "$HOME/.local/share/opencode" \
+  "$HOME/.config/opencode" \
+  "$HOME/.cache/pip" \
+  "$HOME/.npm" \
+  "$HOME/.cache/go-build" \
+  "$HOME/go/pkg/mod" \
+  "$HOME/.cargo/registry" \
+  "$HOME/.cargo/git" \
+  "$HOME/.cache/sccache"
+```
+
+Then hand them over to user `1000:1000`:
+
+```sh
+chown -R 1000:1000 \
+  "$HOME/.cache/opencode" \
+  "$HOME/.local/share/opencode" \
+  "$HOME/.config/opencode" \
+  "$HOME/.cache/pip" \
+  "$HOME/.npm" \
+  "$HOME/.cache/go-build" \
+  "$HOME/go/pkg/mod" \
+  "$HOME/.cargo/registry" \
+  "$HOME/.cargo/git" \
+  "$HOME/.cache/sccache"
+```
+
+Your project workspace also gets bind-mounted (at `/workspace`) and is written
+to by the container, so it too must be owned by `1000:1000`:
+
+```sh
+chown -R 1000:1000 "$WORKSPACE"
+```
+
+> If you override any path via `.env` (e.g. `OPENCODE_SCCACHE_DIR`), create
+> that directory instead and `chown -R 1000:1000` it. Do not run these commands
+> with `sudo` unless the directories live outside your home directory.
 
 ## Environment variables
 
@@ -181,7 +243,13 @@ OPENCODE_SCCACHE_DIR=/mnt/usb2/storage/opencode/cache/rust/sccache
 
 ## Build
 
-### Dockerfile
+The launcher has two image build stages. The base image
+[devsnowdon/opencode-docker](https://hub.docker.com/r/devsnowdon/opencode-docker)
+that is prebuilt and the user image that is `FROM` the base image. To extend
+the base image see the Dockerfile `/Dockerfile`. To see the base image
+`/opencode/Dockerfile`.
+
+### Base Dockerfile
 
 The image is built from `opencode/Dockerfile` as a multi-stage build:
 
@@ -195,9 +263,9 @@ The image is built from `opencode/Dockerfile` as a multi-stage build:
 3. The full Rust toolchain (`clang`, `lld`, `mold`, rustup, sccache) is only
    installed when the `INSTALL_RUST=true` build argument is set.
 
-### Local builds (Makefile)
+#### Local builds (Makefile)
 
-Build the image locally with the Makefile:
+Build the image locally with the latest opencode version run the following:
 
 ```sh
 make build              # native build, tagged registry.lan:5000/snowdon-dev/opencode
@@ -239,11 +307,6 @@ Pushing a `v*` tag triggers the CI build (see below).
   `main`, pushes of a `v*` tag, or manual dispatch, builds the `linux/amd64`
   and `linux/arm64` images and pushes a multi-arch manifest to Docker Hub.
   Requires the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets.
-  The image defaults to `anomalyco/opencode`; override it with the
-  `DOCKERHUB_IMAGE` repository variable. Main pushes are tagged `latest` +
-  `git-<sha>`; version tags get `latest` + the version number.
-- **Gitea Actions — `.gitea/workflows/build.yaml`**: pushes to `main` also
-  trigger a Kaniko build to `registry.lan:5000/snowdon-dev/opencode`.
 
 ## Testing
 
