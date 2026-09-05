@@ -4,17 +4,16 @@ on:
   push:
     tags:
       - 'v*'
-
-#  workflow_dispatch:
-#    inputs:
-#      rust:
-#        description: 'Install the full Rust toolchain (INSTALL_RUST=true)'
-#        type: choice
-#        required: false
-#        default: 'true'
-#        options:
-#          - 'true'
-#          - 'false'
+  workflow_dispatch:
+    inputs:
+      rust:
+        description: 'Install the full Rust toolchain (INSTALL_RUST=true)'
+        type: choice
+        required: false
+        default: 'true'
+        options:
+          - 'true'
+          - 'false'
 
 #    branches:
 #      - main
