@@ -107,16 +107,8 @@ jobs:
             core.setOutput('major', latestVersion.major);
             core.setOutput('updated', String(updated));
 
-      - name: Exit if opencode has not been updated
-        run: |
-          LATEST_VERSION=${{ steps.release.outputs.latest }}
-          if [ "${{ steps.release.outputs.updated }}" = "false" ]; then
-            echo "OpenCode has not been updated ($LATEST_VERSION); nothing to do."
-            exit 0
-          fi
-          echo "OpenCode has been updated ($LATEST_VERSION)."
-
       - name: Failed if something might break
+        if: steps.release.outputs.updated != 'false'
         run: |
           MAJOR=${{ steps.release.outputs.major }}
           if [ "$MAJOR" != "1" ]; then
@@ -124,6 +116,7 @@ jobs:
           fi
 
       - name: Install svu
+        if: steps.release.outputs.updated == 'false'
         run: |
           go install github.com/caarlos0/svu@latest
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
@@ -133,6 +126,7 @@ jobs:
       # default GITHUB_TOKEN do not emit workflow events, so the explicit
       # dispatch below is required.
       - name: Tag patch
+        if: steps.release.outputs.updated != 'false'
         id: tag
         run: |
           TAG="$(svu patch)"
@@ -142,6 +136,7 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Trigger build & push
+        if: steps.release.outputs.updated != 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
