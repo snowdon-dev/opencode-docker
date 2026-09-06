@@ -21,9 +21,9 @@ free to file an issue if it is out-of-date. See [Build](#build) section.
 opencode:help
 opencode
 opencode:new
-opencode:run "npm install"
+opencode:run npm install
 opencode:up
-opencode:setup "npm install"
+opencode:setup npm install
 opencode:down
 opencode:stop
 opencode:stop --all
@@ -53,7 +53,7 @@ OPENCODE_NETWORK="custom-network" opencode
 
 # start the container already ready to go
 cd ~/project
-opencode:setup "npm install" && opencode
+opencode:setup sh -c 'cd front-end && npm install' && opencode
 ```
 
 ## Features
