@@ -38,19 +38,19 @@ RUN addgroup -g $USER_GID $USERNAME \
 # Packages setup
 # ------------------------------------------------------------
 RUN apk add --no-cache \
-    python3=3.14.7-r1 \
-    py3-pip=26.1.2-r0 \
-    go=1.26.3-r0 \
-    nodejs=24.18.1-r0 \
-    npm=11.12.1-r0 \
-    git=2.54.0-r0 \
-    curl=8.22.0-r0 \
-    make=4.4.1-r4 \
-    libpcap-dev=1.10.6-r1 \
-    bash=5.3.9-r1 \
-    ripgrep=15.1.0-r0 \
-    libgcc=15.2.0-r5 \
-    libstdc++=15.2.0-r5
+    python3>=3.14 \
+    py3-pip>=26.1 \
+    'go>=1.26' \
+    nodejs>=24.18 \
+    npm>=11.12 \
+    git>=2.54 \
+    curl>=8.22 \
+    make>=4.4 \
+    libpcap-dev>=1.10.6 \
+    bash>=5.3 \
+    ripgrep>=15.1 \
+    libgcc>=15.2 \
+    libstdc++>=15.2
 
 # Smoke tests for system packages
 RUN python3 --version \
@@ -65,18 +65,18 @@ RUN python3 --version \
 
 RUN if [ "$INSTALL_RUST" = "true" ]; then \
         apk add --no-cache \
-            build-base=0.5-r4 \
-            pkgconf=2.5.1-r0 \
-            openssl-dev=3.5.8-r0 \
-            openssl-libs-static=3.5.8-r0 \
-            clang=22.1.3-r2 \
-            lld=22.1.3-r0 \
-            mold=2.39.1-r0 \
-            cmake=4.2.3-r0 \
-            unzip=6.0-r16 \
-            wayland-dev=1.25.0-r0 \
-            alsa-lib-dev=1.2.15.3-r0 \
-            eudev-dev=3.2.14-r6; \
+            build-base>=0.5 \
+            pkgconf>=2.5 \
+            openssl-dev>=3.5 \
+            openssl-libs-static>=3.5 \
+            clang>=22.1 \
+            lld>=22.1 \
+            mold>=2.39 \
+            cmake>=4.2 \
+            unzip>=6.0 \
+            wayland-dev>=1.25 \
+            alsa-lib-dev>=1.2 \
+            eudev-dev>=3.2; \
     fi
 
 

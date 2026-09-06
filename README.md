@@ -62,7 +62,7 @@ opencode:setup "npm install" && opencode
 - [x] Security: Configure project isolated cache storage via environment variables
 - [ ] Security: Add project specific OPENCODE_DATA_DIR and cache via argument flags
 - [ ] Security: Argument based worktree helpers to isolate node_modules or mount a tmp_dir
-- [ ] Security: Auto update. Pin tools to any security updates. Github workflow
+- [x] Security: Auto update. Pin tools to any security updates. Github workflow
 - [x] [Docker](https://www.docker.com/) base container for opencode work
 - [x] Convenience launcher script
 - [x] [ohmyzsh](https://github.com/ohmyzsh/ohmyzsh/wiki/Customization) plugin ability
