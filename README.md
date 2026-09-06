@@ -388,23 +388,29 @@ gist() {
   local name=$1
   shift
 
-  cd "$SD_HOME/gists/$name" || {
+  local tmp_path="$HOME/repos/gists/$name"
+  cd "$tmp_path" || {
     if (( $# == 0 )); then
-      printf 'Warning:\n gist Directory does not exist\nNo scaffold description was provided.\n' >&2
-      return 1
+      printf 'Warning:\nDirectory does not exist\nNo scaffold description was provided.\n' >&2
+      echo "mkdir: $tmp_path"
+      mkdir "$tmp_path"
+      echo "cd:    $tmp_path"
+      cd "$tmp_path"
+      echo 'run:   opencode:scaffold ./ "Your task"'
+      return
     fi
 
-    mkdir "gists/$name"
+    mkdir "$tmp_path"
+    cd "$tmp_path" || exit 1
 
     if which git > /dev/null; then
-      # Initialize git repository and create initial commit
-      git init # assumed directory is empty
+      git init
       echo "# $name" > README.md
       git add README.md
       git commit -m "Initial commit."
     fi
 
-    opencode:scaffold "gists/$name" "$@"
+    opencode:scaffold ./ "$@"
   }
 }
 ```

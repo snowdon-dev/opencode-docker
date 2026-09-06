@@ -385,7 +385,7 @@ opencode() {
 
   echo "Backend ready. Attaching..."
 
-  # attach a host TUI and wait. on exit kill
+  # attach a TUI and wait
   _run_opencode_executable "$@"
 
   # Verify container status after execution
@@ -1024,9 +1024,9 @@ main() {
       fi
 
       # An absolute path is used as-is: no emptiness check, the caller owns it.
-      # Relative and repo-home paths must target a new or empty directory.
+      # repo-home paths must target a new or empty directory.
       local check_empty=1
-      [[ "$name" == /* ]] && check_empty=0
+      [[ "$name" == /* || "$name" == ./* ]] && check_empty=0
 
       if [[ -e "$ws_out" || -L "$ws_out" ]]; then
         if [[ ! -d "$ws_out" ]]; then
