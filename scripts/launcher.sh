@@ -366,7 +366,8 @@ opencode() {
     docker compose "${OPENCODE_ARGS[@]}" exec \
       -d \
       -w /workspace \
-      opencode opencode serve --hostname 0.0.0.0 --port 4096 
+      opencode opencode serve \
+      --hostname 0.0.0.0 --port 4096
 
     echo "Waiting for the opencode backend to launch"
     # 40 secs
@@ -606,7 +607,7 @@ opencode:new() {
 # An optional workspace argument scopes the stop to containers for that
 # workspace; by default all workspaces are stopped.
 opencode:stop() {
-  echo "Stopping existing opencode containers for project: $proj ($ws)"
+  echo "Stopping existing opencode containers"
 
   local all=0
   for arg in "$@"; do
@@ -720,7 +721,12 @@ opencode:changes() {
       git ls-files --others --exclude-standard
     ')" || { echo "Failed to gather changes." >&2; exit 1; }
 
-  echo "$changes"
+  if (( $(printf '%s\n' "$changes" | wc -l) < 500 )); then
+    echo "$changes"
+  else
+    printf '%s\n' "$changes" | sed -n '1,100p'
+    echo "... output truncated ..."
+  fi
 
   # Default task: analyse and propose a plan. Overridable by the user.
   local task="${1:-analyze the branch changes above and produce a detailed plan of action to address them.}"
@@ -996,13 +1002,23 @@ main() {
     exit 1
   fi
 
-  # update does not operate on a workspace or compose project: it only
-  # refreshes the launcher repo and images, so handle it before any
-  # workspace resolution.
-  if [[ "$cmd" == "update" ]]; then
+  # update etc does not operate on a workspace or compose project: it only
+  # refreshes the launcher repo and images, so handle it before any workspace
+  # resolution.
+  case "$cmd" in
+  update)
     opencode:update "$@"
     return 0
-  fi
+    ;;
+  stop)
+    opencode:stop "$@"
+    return 0
+    ;;
+  delete)
+    opencode:delete "$@"
+    return 0
+    ;;
+  esac
 
   # Get the workspace directory from arguments or current directory
   local ws_out
@@ -1059,7 +1075,7 @@ main() {
         echo "Creating $ws_out"
         mkdir -p -- "$ws_out" || exit 1
       fi
-      ws_out="$(realpath -- "$ws_out")"
+      ws_out="$(cd -- "$ws_out" && pwd)"
     fi
     ;;
   esac
@@ -1072,6 +1088,48 @@ main() {
       shift
     else
       ws_out="$(pwd)"
+    fi
+  fi
+
+  # Skip this check when SD_YOLO is set to "true" (case-insensitive).
+  # Check if the workspace lies outside of a sub directory of $HOME.
+  if [[ ! ${SD_YOLO:-} =~ ^[Tt][Rr][Uu][Ee]$ ]]; then
+    # Remove trailing slashes, while preserving "/".
+    home=$HOME
+    while [[ $home != "/" && $home == */ ]]; do
+      home=${home%/}
+    done
+
+    ws_out_normalized=$ws_out
+    while [[ $ws_out_normalized != "/" && $ws_out_normalized == */ ]]; do
+      ws_out_normalized=${ws_out_normalized%/}
+    done
+
+    valid_subdir=0
+
+    if [[ $home == "/" ]]; then
+      # Any non-root absolute path is a subdirectory of "/".
+      if [[ $ws_out_normalized != "/" &&
+            $ws_out_normalized == /* ]]; then
+        valid_subdir=1
+      fi
+    elif [[ $ws_out_normalized == "$home"/* ]]; then
+      # The "$home/*" pattern excludes "$home" itself.
+      valid_subdir=1
+    fi
+
+    if (( ! valid_subdir )); then
+      printf 'Output directory is outside a subdirectory of HOME:\n  %s\n' "$ws_out"
+      read -r -p "Continue anyway? [y/N] " answer </dev/tty
+
+      case ${answer,,} in
+      y|yes)
+        ;;
+      *)
+        printf 'Aborted.\n' >&2
+        exit 1
+        ;;
+      esac
     fi
   fi
 
@@ -1115,32 +1173,26 @@ main() {
     ;;
   run)
     # Run tasks (e.g. 'npm install' or 'go build') in the opencode container
-     _opencode_ctx opencode:run "$ws_out" "$proj" "$@"
+    _opencode_ctx opencode:run "$ws_out" "$proj" "$@"
     ;;
   new)
     # Remove existing containers before starting a fresh instance
     _opencode_ctx opencode:new "$ws_out" "$proj" "$@"
-    ;;
-  stop)
-    opencode:stop "$@"
-    ;;
-  delete)
-    opencode:delete "$@"
     ;;
   changes)
     # Analyze branch changes for the workspace
     _opencode_ctx opencode:changes "$ws_out" "$proj" "$@"
     ;;
   security)
-    # TODO: Implement command to analyze repository security
-    # Should read code files and check for executable commands in normal usage
-    # For example, checking for npm pre-install scripts or other potential risks
+    # TODO: Implement command to analyze repository security Should read code
+    # files and check for executable commands in normal usage For example,
+    # checking for npm pre-install scripts or other potential risks
     echo "command not implemented"
     ;;
   clone)
-    # TODO: Implement commadn to retrieve a git repository and clone it into a location
-    # clone --check runs security, then perform come action or check if it already exists
-    # and preform some action
+    # TODO: Implement commadn to retrieve a git repository and clone it into a
+    # location clone --check runs security, then perform come action or check
+    # if it already exists and preform some action
     echo "command not implemented"
     ;;
   help)

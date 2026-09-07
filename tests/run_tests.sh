@@ -51,6 +51,7 @@ run_launcher() {
   export OPENCODE_TEST_DOCKER_LOG="$SD/docker.log"
   export SD_OPENCODE="$SD/compose"
   export SD_REPO_HOME="$SD/repos"
+  export SD_YOLO=true
   : >"$OPENCODE_TEST_DOCKER_LOG"
 
   # Optional env overrides
@@ -126,12 +127,12 @@ $CBASE up -d opencode"
 }
 
 t_stop() {
-  # stop: discovers managed containers via _find_docker_managed (all
-  # workspaces by default), stops each.
+  # stop: dispatched before workspace resolution, discovers managed containers
+  # via _find_docker_managed (all workspaces by default), stops each.
   run_launcher /dev/null stop
   assert_docker_contains "docker ps -q --filter label=dev.snowdon.opencode.managed=true"
   assert_docker_contains "docker stop c1"
-  assert_launcher_output_contains "Stopping existing opencode containers for project: ws"
+  assert_launcher_output_contains "Stopping existing opencode containers"
 }
 
 t_exec() {
@@ -154,10 +155,11 @@ $CBASE exec -T -w /workspace opencode npm install"
 
 t_run_nocontainer() {
   # No running container -> throwaway `compose run` (no ports), removed on exit.
+  # Uses --entrypoint /bin/sh so the task args are exec'd by a real shell.
   OPENCODE_TEST_NO_CONTAINER=1 run_launcher /dev/null run "npm install"
   assert_docker "$DINFO
 $CBASE ps -q opencode
-$CBASE run --rm -w /workspace opencode npm install"
+$CBASE run --rm -w /workspace --entrypoint /bin/sh opencode -c exec \"\$@\" sh npm install"
 }
 
 t_setup() {
@@ -233,11 +235,13 @@ t_down() {
 }
 
 t_delete() {
-  # delete: discovers managed containers via _find_docker_managed, force-removes each.
+  # delete: dispatched before workspace resolution, discovers managed containers
+  # via _find_docker_managed --stopped (includes -a for stopped containers),
+  # force-removes each.
   run_launcher /dev/null delete
-  assert_docker_contains "docker ps -q --filter label=dev.snowdon.opencode.managed=true"
+  assert_docker_contains "docker ps -q -a --filter label=dev.snowdon.opencode.managed=true"
   assert_docker_contains "docker rm -f c1"
-  assert_launcher_output_contains "Force-removing existing opencode containers for project: ws"
+  assert_launcher_output_contains "Force-removing all opencode containers"
 }
 
 t_changes() {
@@ -251,11 +255,12 @@ t_changes() {
 }
 
 t_changes_nocontainer() {
-  # No running container -> both steps use a throwaway `compose run`.
+  # No running container -> both steps use a throwaway `compose run`, via
+  # --entrypoint /bin/sh so the git-analysis script and opencode are exec'd.
   OPENCODE_TEST_NO_CONTAINER=1 run_launcher /dev/null changes
   assert_docker_contains "$CBASE ps -q opencode"
-  assert_docker_contains "$CBASE run --rm -w /workspace opencode sh -c"
-  assert_docker_contains "$CBASE run --rm -w /workspace opencode opencode run --agent plan --auto"
+  assert_docker_contains "$CBASE run --rm -w /workspace --entrypoint /bin/sh opencode -c exec \"\$@\" sh sh -c"
+  assert_docker_contains "$CBASE run --rm -w /workspace --entrypoint /bin/sh opencode -c exec \"\$@\" sh opencode run --agent plan --auto"
 }
 
 t_scaffold() {
@@ -305,7 +310,7 @@ t_help_unknown() {
 t_unknown_command() {
   local out
   out="$(cd "$SD/ws" && PATH="$MOCKBIN:$PATH" SD_OPENCODE="$SD/compose" SD_REPO_HOME="$SD/repos" \
-    bash "$LAUNCHER" bogus 2>&1)"
+    SD_YOLO=true bash "$LAUNCHER" bogus 2>&1)"
   if grep -Fq "Unknown command: bogus" <<<"$out"; then
     PASS=$((PASS+1)); echo "  ok: unknown command message"
   else
