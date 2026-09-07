@@ -149,7 +149,7 @@ running `alias | grep -E ^oc` or `alias | grep opencode`. Then try running
 - If not otherwise specified the environment default will only use 2 cpus.
 - An environment `SD_REPO_HOME` variable sets the root location used when
   building non-absolute paths in the scaffold command.
-- The opencode binary from the shell path to run the TUI (`npm i -g opencode-ao`) if one exists.
+- The opencode binary from the shell path to run the TUI (`npm i -g opencode-ai`) if one exists.
 - Docker is required [docker.io](https://www.docker.com/)
 
 ### Creating the directories

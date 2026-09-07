@@ -183,7 +183,9 @@ _opencode_dispatch() {
 
   local running
   running="$(docker compose "${OPENCODE_ARGS[@]}" ps -q opencode)"
-
+  
+  # FIX: Given running arguments like opencode:run --agent plan --prompt ""
+  #       would work. However, if not running, i get: /bin/sh: bad option '--agent'
   if [[ -n "$running" ]]; then
     # Use the already-running container. Without -T (interactive) output streams
     # straight to the terminal; with -T it can be captured by the caller.
@@ -195,7 +197,14 @@ _opencode_dispatch() {
   else
     # No running container: use a throwaway container that runs the task and
     # exits, publishing no ports.
-    docker compose "${OPENCODE_ARGS[@]}" run --rm -w /workspace opencode "$@"
+    docker compose "${OPENCODE_ARGS[@]}" \
+      run --rm \
+      -w /workspace \
+      --entrypoint /bin/sh \
+      opencode \
+      -c 'exec "$@"' \
+      sh \
+      "$@"
   fi
 }
 
@@ -915,7 +924,9 @@ opencode:help() {
   echo "The workspace defaults to the current directory, and SD_OPENCODE points to"
   echo "the compose directory (default: \$HOME/opencode)."
   echo
-  echo "Run '$0 help <command>' for details on a specific command."
+  echo "Run '$0 help <command>'   for details on a specific command."
+  echo "Run '$0 <command> --help' for details on a specific command."
+  echo "Run '$0 <command> -h'     for details on a specific command."
 
   local image="devsnowdon/opencode-docker"
 
@@ -974,6 +985,12 @@ main() {
     ;;
   esac
 
+  # if arguemnt after cmd is --help or -h, redirect to help
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    _opencode_help_cmd "$cmd"
+    exit 0
+  fi
+
   # Just exit if there is no docker
   if ! docker info >/dev/null 2>&1; then
     echo "Docker daemon is not running" >&2
@@ -990,7 +1007,7 @@ main() {
   fi
 
   # Get the workspace directory from arguments or current directory
-  local ws_out="${1:-$(pwd)}"
+  local ws_out
 
   case "$cmd" in
   scaffold)
@@ -1049,58 +1066,62 @@ main() {
     ;;
   esac
 
-  # Validate the workspace directory exists and is accessible
-  if ws_out="$(cd "$ws_out" 2>/dev/null && pwd)"; then
-    shift || true
-  else
-    ws_out="$(pwd)"
+
+  # FIX: when the path is computed not arg 1, it stripping the command
+  if [[ ! -n ${ws_out+x} ]]; then
+    if [[ "$1" == ./* || "$1" == /* ]] && [[ -d $1 ]]; then
+      ws_out="$1"
+      shift
+    else
+      ws_out="$(pwd)"
+    fi
   fi
 
-  local ws="$ws_out"
+  echo "$ws_out"
 
   # Set up compose directory and project name
   local compose_dir="${SD_OPENCODE:-$HOME/opencode}"
-  local proj="$(basename "$ws")"  
+  local proj="$(basename "$ws_out")"  
 
   # Display configuration information
-  echo "Using opencode workspace: $ws"
+  echo "Using opencode workspace: $ws_out"
   echo "Compose project: $proj"
   
   # Dispatch to the appropriate command handler
   case "$cmd" in
   down)
-    _opencode_ctx opencode:down "$ws" "$proj" "$@"
+    _opencode_ctx opencode:down "$ws_out" "$proj" "$@"
     ;;
   start)
-    _opencode_ctx opencode "$ws" "$proj" "$@"
+    _opencode_ctx opencode "$ws_out" "$proj" "$@"
     ;;
   exec)
-    _opencode_ctx opencode:exec "$ws" "$proj" "$@"
+    _opencode_ctx opencode:exec "$ws_out" "$proj" "$@"
     ;;
   compose)
-    _opencode_ctx opencode:compose "$ws" "$proj" "$@"
+    _opencode_ctx opencode:compose "$ws_out" "$proj" "$@"
     ;;
   shell)
-    _opencode_ctx opencode:exec "$ws" "$proj" sh "$@"
+    _opencode_ctx opencode:exec "$ws_out" "$proj" sh "$@"
     ;;
   up)
     # Start containers without running processes
-    _opencode_ctx opencode:up "$ws" "$proj" "$@"
+    _opencode_ctx opencode:up "$ws_out" "$proj" "$@"
     ;;
   scaffold)
-    _opencode_ctx opencode:scaffold "$ws" "$proj" "$@"
+    _opencode_ctx opencode:scaffold "$ws_out" "$proj" "$@"
     ;;
   setup)
     # Run setup commands on an persisted instance
-    _opencode_ctx opencode:setup "$ws" "$proj" "$@"
+    _opencode_ctx opencode:setup "$ws_out" "$proj" "$@"
     ;;
   run)
     # Run tasks (e.g. 'npm install' or 'go build') in the opencode container
-    _opencode_ctx opencode:run "$ws" "$proj" "$@"
+     _opencode_ctx opencode:run "$ws_out" "$proj" "$@"
     ;;
   new)
     # Remove existing containers before starting a fresh instance
-    _opencode_ctx opencode:new "$ws" "$proj" "$@"
+    _opencode_ctx opencode:new "$ws_out" "$proj" "$@"
     ;;
   stop)
     opencode:stop "$@"
@@ -1110,7 +1131,7 @@ main() {
     ;;
   changes)
     # Analyze branch changes for the workspace
-    _opencode_ctx opencode:changes "$ws" "$proj" "$@"
+    _opencode_ctx opencode:changes "$ws_out" "$proj" "$@"
     ;;
   security)
     # TODO: Implement command to analyze repository security
