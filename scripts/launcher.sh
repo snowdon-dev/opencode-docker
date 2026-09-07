@@ -249,8 +249,7 @@ _backend_healthy() {
 # the results to containers labelled for that workspace.
 _find_docker_managed() {
   local include_oneoff=0
-  local ws_filter=""
-  local stopped=""
+  local ws_filted stopped
   for arg in "$@"; do
     case "$arg" in
       --all) include_oneoff=1 ;;
@@ -417,6 +416,12 @@ opencode:exec() {
   # Ensure the container is running before executing commands
   #_opencode_ensure_up
 
+  if [ "$#" == 0 ]; then
+    echo "No arguments were provided."
+    _opencode_help_cmd "exec"
+    exit 1
+  fi
+
   # Execute command interactively in the running container
   docker compose "${OPENCODE_ARGS[@]}" exec -it opencode "$@"
 }
@@ -429,7 +434,14 @@ opencode:exec() {
 opencode:run() {
   echo "Running in opencode project: $proj ($ws)"
 
-  _opencode_dispatch 0 "$@"
+  if [ "$#" -gt 0 ]; then
+    echo "Running command in the container"
+    _opencode_dispatch 0 "$@"
+  else
+    echo "No arguments were provided."
+    _opencode_help_cmd "run"
+    exit 1
+  fi
 }
 
 # Run setup commands on an existing persisted opencode instance.
@@ -441,8 +453,12 @@ opencode:setup() {
   echo "Setting up opencode project: $proj ($ws)"
 
   _opencode_ensure_up
-  # and create the resources in that container
-  _opencode_dispatch 0 "$@"
+
+  if [ "$#" -gt 0 ]; then
+    echo "Running command in the container"
+    # and create the resources in that container
+    _opencode_dispatch 0 "$@"
+  fi
 }
 
 # Execute arbitrary Docker Compose commands for the opencode project
@@ -450,6 +466,12 @@ opencode:setup() {
 # for advanced container management operations.
 opencode:compose() {
   echo "Running Docker Compose for project: $proj ($ws)"
+
+  if [ "$#" == 0 ]; then
+    echo "No arguments were provided."
+    _opencode_help_cmd "compose"
+    exit 1
+  fi
 
   # Pass all arguments directly to Docker Compose
   docker compose "${OPENCODE_ARGS[@]}" "$@"
@@ -517,7 +539,8 @@ opencode:scaffold() {
   elif [[ ! -t 0 ]]; then
     task=$(cat)
   else
-    echo "error: no task provided" >&2
+    echo "Error: no task provided" >&2
+    _opencode_help_cmd "scaffold"
     exit 1
   fi
 
@@ -566,8 +589,8 @@ Your task is as follows:
   cleanup_add _cleanup_scaffold
 
   # Execute opencode with context information
-  printf '%s' "$task" | docker compose "${OPENCODE_ARGS[@]}" run --rm -T --name "$cname" opencode \
-    'exec opencode run "$@"' opencode --auto "$tmp_context" "$@" >"$outfile" 2>&1 &
+  printf '%s%s' "$tmp_context" "$task" | docker compose "${OPENCODE_ARGS[@]}" run --rm -T --name "$cname" opencode \
+    'exec opencode run "$@"' opencode --auto "$@" >"$outfile" 2>&1 &
   _cleanup_scaffold_pid=$!
 
   # Stream the captured output to the terminal
@@ -598,15 +621,19 @@ opencode:stop() {
   echo "Stopping existing opencode containers"
 
   local all=0
+  args+=("$arg")
   for arg in "$@"; do
-    [ "$arg" = "--all" ] && all=1
+    case "$arg" in
+    --all|-a) all=1 ;;
+    *) args+=("$arg") ;;
+    esac
   done
 
   # First positional argument is the workspace to scope to; empty = all
   # workspaces.
   local ws_scope=""
-  if [[ -n "${1:-}" && "${1:-}" != "--all" ]]; then
-    ws_scope="$1"
+  if [[ -n "${args[0]:-}" ]]; then
+    ws_scope="${args[0]}"
   fi
 
   # Inspect managed containers and their workspace labels to warn about
@@ -634,15 +661,19 @@ opencode:delete() {
   echo "Force-removing all opencode containers"
 
   local all=0
+  args+=("$arg")
   for arg in "$@"; do
-    [ "$arg" = "--all" ] && all=1
+    case "$arg" in
+    --all|-a) all=1 ;;
+    *) args+=("$arg") ;;
+    esac
   done
 
   # First positional argument is the workspace to scope to; empty = all
   # workspaces.
   local ws_scope=""
-  if [[ -n "${1:-}" && "${1:-}" != "--all" ]]; then
-    ws_scope="$1"
+  if [[ -n "${args[0]:-}" ]]; then
+    ws_scope="${args[0]}"
   fi
 
   while read -r id; do
@@ -655,6 +686,12 @@ opencode:delete() {
     fi
     docker rm -f "$id"
   done < <(_find_docker_managed --stopped ${ws_scope:+$ws_scope} $([ "$all" -eq 1 ] && echo --all))
+
+  # remove all the images
+  if [ $all -eq 1 ]; then
+    docker image ls --filter label=dev.snowdon.image.opencode.devcontainer -q \
+      | xargs -r docker image rm
+  fi
 }
 
 # Analyze the workspace branch changes with a non-interactive opencode run.
@@ -831,9 +868,9 @@ down)
     echo "  then runs an interactive opencode scaffolding session."
     echo "  If not given a task argument, it will read from the stdin"
     echo "  Args:"
-    echo "    path      Project name or './relative/path'. Optional."
-    echo "    task      A description of what opencode should do"
-    echo "    opencode args...   Additional arguments forwarded to the opencode CLI."
+    echo "    path                Project name or './relative/path'. Optional."
+    echo "    task                A description of what opencode should do"
+    echo "    opencode args...    Additional arguments forwarded to the opencode CLI."
     ;;
   security)
     echo "security"
@@ -958,6 +995,51 @@ opencode:help() {
   fi
 }
 
+_maybe_check_outside_home() {
+  local ws_out home ws_out_normalized valid_subdir answer
+  ws_out="$1"
+
+  if [[ ! ${SD_YOLO:-} =~ ^[Tt][Rr][Uu][Ee]$ ]]; then
+    # Remove trailing slashes, while preserving "/".
+    home=$HOME
+    while [[ $home != "/" && $home == */ ]]; do
+      home=${home%/}
+    done
+
+    ws_out_normalized=$ws_out
+    while [[ $ws_out_normalized != "/" && $ws_out_normalized == */ ]]; do
+      ws_out_normalized=${ws_out_normalized%/}
+    done
+
+    valid_subdir=0
+
+    if [[ $home == "/" ]]; then
+      # Any non-root absolute path is a subdirectory of "/".
+      if [[ $ws_out_normalized != "/" &&
+            $ws_out_normalized == /* ]]; then
+        valid_subdir=1
+      fi
+    elif [[ $ws_out_normalized == "$home"/* ]]; then
+      # The "$home/*" pattern excludes "$home" itself.
+      valid_subdir=1
+    fi
+
+    if (( ! valid_subdir )); then
+      printf 'Output directory is outside a subdirectory of HOME:\n  %s\n' "$ws_out"
+      read -r -p "Continue anyway? [y/N] " answer </dev/tty
+
+      case ${answer,,} in
+      y|yes)
+        ;;
+      *)
+        printf 'Aborted.\n' >&2
+        exit 1
+        ;;
+      esac
+    fi
+  fi
+}
+
 # Main entry point for the opencode launcher script
 # This function parses command-line arguments and dispatches to the
 # appropriate handler function based on the specified command.
@@ -1073,7 +1155,7 @@ main() {
   # else we use the cwd.
   if [[ ! -n ${ws_out+x} ]]; then
     if [[ "$1" == ./* || "$1" == /* ]] && [[ -d $1 ]]; then
-      ws_out="$1"
+      ws_out="$(realpath $1)"
       shift
     else
       ws_out="$(pwd)"
@@ -1082,45 +1164,7 @@ main() {
 
   # Skip this check when SD_YOLO is set to "true" (case-insensitive).
   # Check if the workspace lies outside of a sub directory of $HOME.
-  if [[ ! ${SD_YOLO:-} =~ ^[Tt][Rr][Uu][Ee]$ ]]; then
-    # Remove trailing slashes, while preserving "/".
-    home=$HOME
-    while [[ $home != "/" && $home == */ ]]; do
-      home=${home%/}
-    done
-
-    ws_out_normalized=$ws_out
-    while [[ $ws_out_normalized != "/" && $ws_out_normalized == */ ]]; do
-      ws_out_normalized=${ws_out_normalized%/}
-    done
-
-    valid_subdir=0
-
-    if [[ $home == "/" ]]; then
-      # Any non-root absolute path is a subdirectory of "/".
-      if [[ $ws_out_normalized != "/" &&
-            $ws_out_normalized == /* ]]; then
-        valid_subdir=1
-      fi
-    elif [[ $ws_out_normalized == "$home"/* ]]; then
-      # The "$home/*" pattern excludes "$home" itself.
-      valid_subdir=1
-    fi
-
-    if (( ! valid_subdir )); then
-      printf 'Output directory is outside a subdirectory of HOME:\n  %s\n' "$ws_out"
-      read -r -p "Continue anyway? [y/N] " answer </dev/tty
-
-      case ${answer,,} in
-      y|yes)
-        ;;
-      *)
-        printf 'Aborted.\n' >&2
-        exit 1
-        ;;
-      esac
-    fi
-  fi
+  _maybe_check_outside_home
 
   # Set up compose directory and project name
   local compose_dir="${SD_OPENCODE:-$HOME/opencode}"
