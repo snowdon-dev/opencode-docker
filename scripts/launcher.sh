@@ -7,15 +7,16 @@ TUI_LABEL="dev.snowdon.opencode.tui"
 IMAGE_URL="${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker}"
 LOOPBACK="127.0.0.1"
 
-declare -ga _cleanup_stack=()
+OPENCODE_ARGS=""
 
 tmp_compose_dir=""
 tmp_compose_file=""
+
 _cleanup_scaffold_name=""
 _cleanup_scaffold_pid=""
 _cleanup_scaffold_output=""
 
-OPENCODE_ARGS=""
+declare -ga _cleanup_stack=()
 
 _cleanup_run() {
   local i
@@ -569,25 +570,12 @@ Your task is as follows:
     'exec opencode run "$@"' opencode --auto "$tmp_context" "$@" >"$outfile" 2>&1 &
   _cleanup_scaffold_pid=$!
 
-  # Stream the captured output to the terminal, then drain whatever is left.
-  # A plain `wait` would not run the INT trap until docker compose exits, so
-  # this poll loop keeps the shell responsive to the trap that kills it all.
-  offset=0
-  while kill -0 "$_cleanup_scaffold_pid" 2>/dev/null; do
-    size=$(wc -c <"$outfile")
-    if ((size > offset)); then
-      tail -c "+$((offset + 1))" "$outfile"
-      offset=$size
-    fi
-    sleep 0.2
-  done
-  size=$(wc -c <"$outfile")
-  if ((size > offset)); then
-    tail -c "+$((offset + 1))" "$outfile"
-  fi
-
+  # Stream the captured output to the terminal
+  tail -f "$outfile" &
+  local _tail_pid=$!
   wait "$_cleanup_scaffold_pid"
   status=$?
+  kill $_tail_pid
 
   return "$status"
 }
@@ -1053,6 +1041,7 @@ main() {
         # under the SD_REPO_HOME root
         ws_out="${SD_REPO_HOME:-/home/$USER/repos}/$name"
       fi
+      shift
 
       # An absolute path is used as-is: no emptiness check, the caller owns it.
       # repo-home paths must target a new or empty directory.
@@ -1132,8 +1121,6 @@ main() {
       esac
     fi
   fi
-
-  echo "$ws_out"
 
   # Set up compose directory and project name
   local compose_dir="${SD_OPENCODE:-$HOME/opencode}"
