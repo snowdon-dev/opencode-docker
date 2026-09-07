@@ -3,6 +3,7 @@
 SD_OPENCODE="${SD_OPENCODE:-$HOME/opencode}"
 MANAGE_LABEL="dev.snowdon.opencode.managed"
 WORKSPACE_LABEL="dev.snowdon.opencode.workspace"
+LABEL_DEV_CONTAINER="dev.snowdon.image.opencode.devcontainer"
 TUI_LABEL="dev.snowdon.opencode.tui"
 IMAGE_URL="${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker}"
 LOOPBACK="127.0.0.1"
@@ -589,8 +590,10 @@ Your task is as follows:
   cleanup_add _cleanup_scaffold
 
   # Execute opencode with context information
-  printf '%s%s' "$tmp_context" "$task" | docker compose "${OPENCODE_ARGS[@]}" run --rm -T --name "$cname" opencode \
-    'exec opencode run "$@"' opencode --auto "$@" >"$outfile" 2>&1 &
+  printf '%s%s' "$tmp_context" "$task" \
+    | docker compose "${OPENCODE_ARGS[@]}" \
+      run --rm -T --name "$cname" opencode 'exec opencode run "$@"' \
+      opencode --auto "$@" >"$outfile" 2>&1 &
   _cleanup_scaffold_pid=$!
 
   # Stream the captured output to the terminal
@@ -621,7 +624,7 @@ opencode:stop() {
   echo "Stopping existing opencode containers"
 
   local all=0
-  args+=("$arg")
+  local args=()
   for arg in "$@"; do
     case "$arg" in
     --all|-a) all=1 ;;
@@ -647,7 +650,10 @@ opencode:stop() {
       echo "Stopping managed container $id"
     fi
     docker stop "$id"
-  done < <(_find_docker_managed ${ws_scope:+$ws_scope} $([ "$all" -eq 1 ] && echo --all))
+  done < <( \
+    _find_docker_managed \
+      ${ws_scope:+$ws_scope} \
+      $([ "$all" -eq 1 ] && echo --all))
 }
 
 # Force-remove all managed opencode containers.
@@ -661,7 +667,7 @@ opencode:delete() {
   echo "Force-removing all opencode containers"
 
   local all=0
-  args+=("$arg")
+  local args=()
   for arg in "$@"; do
     case "$arg" in
     --all|-a) all=1 ;;
@@ -685,11 +691,15 @@ opencode:delete() {
       echo "Force-removing managed container $id"
     fi
     docker rm -f "$id"
-  done < <(_find_docker_managed --stopped ${ws_scope:+$ws_scope} $([ "$all" -eq 1 ] && echo --all))
+  done < <( \
+    _find_docker_managed \
+      --stopped \
+      ${ws_scope:+$ws_scope} \
+      $([ "$all" -eq 1 ] && echo --all))
 
   # remove all the images
   if [ $all -eq 1 ]; then
-    docker image ls --filter label=dev.snowdon.image.opencode.devcontainer -q \
+    docker image ls --filter label="$LABEL_DEV_CONTAINER" -q \
       | xargs -r docker image rm
   fi
 }
@@ -1164,7 +1174,7 @@ main() {
 
   # Skip this check when SD_YOLO is set to "true" (case-insensitive).
   # Check if the workspace lies outside of a sub directory of $HOME.
-  _maybe_check_outside_home
+  _maybe_check_outside_home "$ws_out"
 
   # Set up compose directory and project name
   local compose_dir="${SD_OPENCODE:-$HOME/opencode}"
