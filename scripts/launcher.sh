@@ -184,8 +184,6 @@ _opencode_dispatch() {
   local running
   running="$(docker compose "${OPENCODE_ARGS[@]}" ps -q opencode)"
   
-  # FIX: Given running arguments like opencode:run --agent plan --prompt ""
-  #       would work. However, if not running, i get: /bin/sh: bad option '--agent'
   if [[ -n "$running" ]]; then
     # Use the already-running container. Without -T (interactive) output streams
     # straight to the terminal; with -T it can be captured by the caller.
@@ -1066,8 +1064,8 @@ main() {
     ;;
   esac
 
-
-  # FIX: when the path is computed not arg 1, it stripping the command
+  # when argument one is a path starting with / or ./ capture it as the ws_out,
+  # else we use the cwd.
   if [[ ! -n ${ws_out+x} ]]; then
     if [[ "$1" == ./* || "$1" == /* ]] && [[ -d $1 ]]; then
       ws_out="$1"
