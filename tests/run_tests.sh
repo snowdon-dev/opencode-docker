@@ -28,7 +28,7 @@ declare -a FAILED_TESTS=()
 # with a .git dir so the launcher's read-only .git mount logic is exercised.
 make_sandbox() {
   SD="$(mktemp -d "${TMPDIR:-/tmp}/opencode-tests.XXXXXX")"
-  mkdir -p "$SD/compose" "$SD/ws/.git"
+  mkdir -p "$SD/compose" "$SD/compose/compose-vol" "$SD/compose/compose-net" "$SD/ws/.git"
   echo 'services: { opencode: {} }' >"$SD/compose/docker-compose.yml"
   # Compose base args used in every expected command (git mount is pruned by
   # mktemp normalisation).
@@ -220,24 +220,24 @@ docker compose -p ws -f $SD/compose/docker-compose.yml config --services"
 
 t_cache_all() {
   # OPENCODE_CACHE=all mounts every toolchain cache via docker-compose.cache.yml.
-  echo 'services: { opencode: {} }' >"$SD/compose/docker-compose.cache.yml"
+  echo 'services: { opencode: {} }' >"$SD/compose/compose-vol/docker-compose.cache.yml"
   local dotfile="$SD/cache.env"
   echo 'OPENCODE_CACHE=all' >"$dotfile"
   run_launcher "$dotfile" compose config --services
   assert_docker "$DINFO
-docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/docker-compose.cache.yml -f <tmp>/docker-compose.git.yml config --services"
+docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose-vol/docker-compose.cache.yml -f <tmp>/docker-compose.git.yml config --services"
   unset OPENCODE_CACHE
 }
 
 t_cache_ids() {
   # Space-separated ids (case-insensitive) add only those override files.
-  echo 'services: { opencode: {} }' >"$SD/compose/docker-compose.go.yml"
-  echo 'services: { opencode: {} }' >"$SD/compose/docker-compose.python.yml"
+  echo 'services: { opencode: {} }' >"$SD/compose/compose-vol/docker-compose.go.yml"
+  echo 'services: { opencode: {} }' >"$SD/compose/compose-vol/docker-compose.python.yml"
   local dotfile="$SD/cache.env"
   echo 'OPENCODE_CACHE="Go PYTHON"' >"$dotfile"
   run_launcher "$dotfile" compose config --services
   assert_docker "$DINFO
-docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/docker-compose.go.yml -f $SD/compose/docker-compose.python.yml -f <tmp>/docker-compose.git.yml config --services"
+docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose-vol/docker-compose.go.yml -f $SD/compose/compose-vol/docker-compose.python.yml -f <tmp>/docker-compose.git.yml config --services"
   unset OPENCODE_CACHE
 }
 

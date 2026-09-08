@@ -7,7 +7,8 @@
 A security and human-control oriented [opencode](https://opencode.ai) workflow
 that runs in a Docker container. The current project bind-mounted at
 `/workspace`, plus persistent caches for full language toolchains installed in
-the image (Go, Rust, Node, Python).
+the image (Go, Rust, Node, Python). All features are security first with
+convenience opts in.
 
 This project has been designed for arm architecture devices like the [Raspberry
 Pi](https://www.raspberrypi.com/). However, it should be compatible with x86.
@@ -62,22 +63,32 @@ opencode:setup sh -c 'cd front-end && npm install' && opencode
 ## Features
 
 - [x] Security: Prevent potential destructive actions by the agent
-- [x] Security: Configure project isolated cache storage via environment variables
-- [ ] Security: Add project specific OPENCODE_DATA_DIR and cache via argument flags
-- [ ] Security: Argument based worktree helpers to isolate node_modules or mount a tmp_dir
-- [x] Security: Path prompt check when outside `$HOME`, or `$SD_REPO_HOME` when `$SD_YOLO_HOME` equals true
+- [x] Security: Configure project isolated cache storage via environment
+  variables
+- [ ] Security: Add project specific OPENCODE_DATA_DIR and cache via argument
+  flags
+- [ ] Security: Argument based worktree helpers to isolate node_modules or
+  mount a tmp_dir
+- [x] Security: Path prompt check when outside `$HOME`, or `$SD_REPO_HOME` when
+  `$SD_YOLO_HOME` equals true
 - [x] Security: Auto update. Pin tools to any security updates. Github workflow
 - [x] [Docker](https://www.docker.com/) base container for opencode work
 - [x] Convenience launcher script
-- [x] [ohmyzsh](https://github.com/ohmyzsh/ohmyzsh/wiki/Customization) plugin ability
+- [x] [ohmyzsh](https://github.com/ohmyzsh/ohmyzsh/wiki/Customization) plugin
+  ability
 - [x] [Add github build - docker step by step guide](https://docs.docker.com/guides/gha/)
 - [x] Prevent large arguments leaks and enable task via std
 - [x] Allow easy mounting of the config dir
-- [ ] Layered containers - full(rust, go, c, node, python) - duck(node, python) - empty.
+- [ ] Layered containers - full(rust, go, c, node, python) - duck(node, python)
+  empty.
 - [ ] Layered containers - [development containers spec](https://containers.dev/implementors/spec/)
-- [ ] Layered containers - In the docker compose, use build. and add a docker that uses FROM image-full
-- [ ] Fix: Allow multiple port bindings to enable multiple running agents on multiple projects
+- [ ] Layered containers - In the docker compose, use build. and add a docker
+  that uses FROM image-full
+- [ ] Fix: Allow multiple port bindings to enable multiple running agents on
+  multiple projects
 - [ ] Project creation with scaffold extra context
+- [ ] /Dockerfile should only be added if a Dockerfile exists. Otherwise use
+  image - Then image does not have a workspace
 
 ## Install
 
@@ -222,7 +233,7 @@ default pointing at the conventional location under your home directory
 |----------------------------|----------------------------------|-------------------------------------|
 | `WORKSPACE`                | `.`                              | `/workspace`                        |
 | `OPENCODE_CPUSET`          | `2-3`                            | – (CPU pinning)                     |
-| `OPENCODE_NETWORK`         | –                                | – (external network, see `docker-compose.network.yml`) |
+| `OPENCODE_NETWORK`         | –                                | – (external network, see `compose-net/docker-compose.network.yml`) |
 | `OPENCODE_CACHE_DIR`       | `$HOME/.cache/opencode/cache`    | `/home/other/.cache/opencode/cache` |
 | `OPENCODE_DATA_DIR`        | `$HOME/.local/share/opencode`    | `/home/other/.local/share/opencode` |
 | `OPENCODE_CONFIG_DIR`      | `$HOME/.config/opencode`         | `/home/other/.config`               |
@@ -241,9 +252,10 @@ The toolchain cache mounts (`OPENCODE_PIP_CACHE_DIR`, `OPENCODE_NPM_CACHE_DIR`,
 `OPENCODE_GO_BUILD_CACHE_DIR`, `OPENCODE_GO_MOD_CACHE_DIR`,
 `OPENCODE_CARGO_REGISTRY_DIR`, `OPENCODE_CARGO_GIT_DIR`,
 `OPENCODE_SCCACHE_DIR`) are **not** mounted by default. They are defined in the
-dedicated override files `docker-compose.python.yml`, `docker-compose.node.yml`,
-`docker-compose.go.yml`, `docker-compose.rust.yml` (and the combined
-`docker-compose.cache.yml`), which the launcher only merges in when
+dedicated override files `compose-vol/docker-compose.python.yml`,
+`compose-vol/docker-compose.node.yml`, `compose-vol/docker-compose.go.yml`,
+`compose-vol/docker-compose.rust.yml` (and the combined
+`compose-vol/docker-compose.cache.yml`), which the launcher only merges in when
 `OPENCODE_CACHE` is set — see below. This is a deliberate, security-first
 breaking change: toolchain caches hold executable artifacts that get run inside
 the container, so they are no longer mounted unconditionally. Opt into exactly
@@ -271,12 +283,14 @@ Details:
   override files.
 - `OPENCODE_CACHE` — controls which host toolchain cache directories are
   mounted into the container. Unset or `false` mounts none (the security-first
-  default). `all` mounts every toolchain cache via `docker-compose.cache.yml`.
+  default). `all` mounts every toolchain cache via
+  `compose-vol/docker-compose.cache.yml`.
   A space-separated list of case-insensitive ids mounts only those, each
-  defined in a dedicated override file: `python` (`docker-compose.python.yml`,
-  pip cache), `node` (`docker-compose.node.yml`, npm cache), `go`
-  (`docker-compose.go.yml`, go build + module cache), `rust`
-  (`docker-compose.rust.yml`, cargo registry + git + sccache). Any unknown id
+  defined in a dedicated override file: `python`
+  (`compose-vol/docker-compose.python.yml`,
+  pip cache), `node` (`compose-vol/docker-compose.node.yml`, npm cache), `go`
+  (`compose-vol/docker-compose.go.yml`, go build + module cache), `rust`
+  (`compose-vol/docker-compose.rust.yml`, cargo registry + git + sccache). Any unknown id
   aborts the launcher. This is a breaking change: the toolchain caches used to
   be mounted by default and are now opt-in, because cached toolchain artifacts
   are executed inside the container. Example:
@@ -446,7 +460,7 @@ change per request.
   mounts targeting `/home/other/...` run as uid 1000, while `/root/...` targets
   (pip, npm) are written as root.
 - `docker-compose.git.yml` mounts the workspace's `.git` directories read-only
-  and `docker-compose.network.yml` attaches an external network
+  and `compose-net/docker-compose.network.yml` attaches an external network
   (`OPENCODE_NETWORK`); both overlay the base file via `-f`.
 - The compose file bind-mounts the host config directory
   (`OPENCODE_CONFIG_DIR`, default `$HOME/.config/opencode`) at

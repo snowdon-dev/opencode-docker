@@ -13,6 +13,9 @@ TUI_LABEL="dev.snowdon.opencode.tui"
 IMAGE_URL="${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker:latest}"
 LOOPBACK="127.0.0.1"
 
+COMPOSE_NET_DIR="${SD_OPENCODE:-$HOME/opencode}/compose-net"
+COMPOSE_VOL_DIR="${SD_OPENCODE:-$HOME/opencode}/compose-vol"
+
 OPENCODE_ARGS=""
 
 tmp_compose_dir=""
@@ -82,7 +85,7 @@ _print_readme() {
   echo '```'
 }
 
-_file_is_yml() {
+_assert_file_is_yml() {
   local file="$1"
   if [[ ! -f "$file" ]]; then
     echo "Error: not a regular file: $file" >&2
@@ -119,14 +122,16 @@ _opencode_args_prepare() {
   # "go python" adds go and python. Values are case-insensitive.
   if [[ -n "${OPENCODE_CACHE}" ]]; then
     if [[ "${OPENCODE_CACHE,,}" == "all" ]]; then
-      args_out+=(-f "$compose_dir/docker-compose.cache.yml")
+      args_out+=(-f "$COMPOSE_VOL_DIR/docker-compose.cache.yml")
     elif [[ "${OPENCODE_CACHE,,}" == "false" ]]; then
       echo "Running container without toolchain cache"
     else
       for id in ${OPENCODE_CACHE,,}; do
         case "$id" in
         go | node | python | rust)
-          args_out+=(-f "$compose_dir/docker-compose.$id.yml")
+          local file="$COMPOSE_VOL_DIR/docker-compose.$id.yml"
+          _assert_file_is_yml "$file" || exit 1
+          args_out+=(-f "$file")
           ;;
         *)
           echo "Error: unknown toolchain cache id: $id (valid ids: all, go, node, python, rust)" >&2
@@ -139,13 +144,13 @@ _opencode_args_prepare() {
 
   # Add network configuration if OPENCODE_NETWORK environment variable is set
   if [[ -n "${OPENCODE_NETWORK:-}" ]]; then
-    args_out+=(-f "$compose_dir/docker-compose.network.yml")
+    args_out+=(-f "$COMPOSE_NET_DIR/docker-compose.network.yml")
     echo "Using network: $OPENCODE_NETWORK"
   fi
 
   # mount any user defined compose files and merge them
   for file in $OPENCODE_COMPOSE; do
-    if _file_is_yml "$file"; then
+    if _assert_file_is_yml "$file"; then
       args_out+=(-f "$file")
     else
       exit 1
