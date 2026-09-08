@@ -37,6 +37,10 @@ if [[ "$1" == "compose" ]]; then
   done
   case "$sub" in
     up)
+      if [[ "${OPENCODE_TEST_BUILD_FAIL:-}" == "1" ]]; then
+        echo "mocked: up FAIL" >&2
+        exit 1
+      fi
       echo "mocked: up"
       ;;
     down)
@@ -80,6 +84,10 @@ if [[ "$1" == "compose" ]]; then
   esac
 elif [[ "$1" == "ps" ]]; then
   shift
+  # Simulate "no managed containers" so ls can exercise its empty listing.
+  if [[ "${OPENCODE_TEST_NO_CONTAINER:-}" == "1" ]]; then
+    exit 0
+  fi
   # Normal case: report a single managed container. With the -q flag only the
   # container id is printed (used by conflict detection), otherwise the old
   # "<id>\t<workspace>" form. With OPENCODE_TEST_CONFLICT=1, report a
@@ -106,7 +114,23 @@ elif [[ "$1" == "inspect" ]]; then
       *) shift ;;
     esac
   done
-  if [[ "${OPENCODE_TEST_CONFLICT:-}" == "1" ]]; then
+  if [[ "$f" == *"State.Status"* ]]; then
+    # Combined record used by opencode:ls: id, status, workspace, project,
+    # tui, sentinel. The trailing '.' keeps empty trailing label columns in
+    # place through the launcher's `read -a` splitting. The format must use a
+    # Go string literal ({{"\t"}}) for field separators: docker inspect does
+    # NOT interpolate a raw \t, so reflect that here by emitting literal
+    # backslash-t when the format lacks the Go literal.
+    sep="\t"
+    if [[ "$f" == *'{{"\t"}}'* ]]; then
+      sep=$'\t'
+    fi
+    printf 'c1%srunning%s%s%sws%sfalse%s.\n' "$sep" "$sep" "$PWD" "$sep" "$sep" "$sep"
+  elif [[ "$f" == *'{{"\t"}}'* ]]; then
+    # Combined record used by _find_docker_managed (oneoff + tui labels).
+    # Both values render empty so the container passes the oneoff filter.
+    printf '\t\t.\n'
+  elif [[ "${OPENCODE_TEST_CONFLICT:-}" == "1" ]]; then
     echo "/workspace/other"
   else
     echo "$PWD"

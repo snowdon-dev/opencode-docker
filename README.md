@@ -29,6 +29,9 @@ opencode:stop
 opencode:stop --all
 opencode:delete
 opencode:delete --all
+opencode:ls
+opencode:ls --all
+opencode:ls --quiet ~/somerepo
 opencode:exec sh
 opencode:shell
 opencode:compose exec -it opencode sh
@@ -62,6 +65,7 @@ opencode:setup sh -c 'cd front-end && npm install' && opencode
 - [x] Security: Configure project isolated cache storage via environment variables
 - [ ] Security: Add project specific OPENCODE_DATA_DIR and cache via argument flags
 - [ ] Security: Argument based worktree helpers to isolate node_modules or mount a tmp_dir
+- [x] Security: Path prompt check when outside `$HOME`, or `$SD_REPO_HOME` when `$SD_YOLO_HOME` equals true
 - [x] Security: Auto update. Pin tools to any security updates. Github workflow
 - [x] [Docker](https://www.docker.com/) base container for opencode work
 - [x] Convenience launcher script
@@ -202,6 +206,8 @@ chown -R 1000:1000 "$WORKSPACE"
 
 ## Environment variables
 
+### Compose variables
+
 All host-side paths are configured with environment variables. Substitution
 happens on the host when `docker compose` runs, and every variable has a
 default pointing at the conventional location under your home directory
@@ -225,6 +231,44 @@ default pointing at the conventional location under your home directory
 
 The container-side paths are fixed: they must match the user baked into the
 image (`other`, uid/gid 1000, see `opencode/Dockerfile`).
+
+### Launcher variables
+
+These variables are read by `scripts/launcher.sh` from the shell environment
+(they are not compose path variables):
+
+| Variable                   | Default                    | Effect                                              |
+|----------------------------|----------------------------|-----------------------------------------------------|
+| `OPENCODE_COMPOSE`         | –                          | Space-separated extra `docker compose` files, merged into the project via `-f` |
+| `OPENCODE_BACKEND_ORIGIN`  | `http://127.0.0.1:4096`    | Backend URL used for the health check and TUI attach |
+| `SD_YOLO`                  | –                          | `true` (case-insensitive) skips the outside-`HOME` workspace check |
+| `SD_YOLO_HOME`             | –                          | `true` validates workspaces against `SD_REPO_HOME` instead of `$HOME` |
+| `SD_READ_ONLY`             | –                          | `false` (case-insensitive) skips the read-only `.git` override file |
+
+Details:
+
+- `OPENCODE_COMPOSE` — each entry must be a regular file with a `.yml` or
+  `.yaml` extension; anything else aborts the launcher. The files are passed
+  to `docker compose -f` alongside the base and (optional) network/git
+  override files.
+- `OPENCODE_BACKEND_ORIGIN` — when a host `opencode` binary is on the `PATH`,
+  the default is `http://127.0.0.1:4096` (the published backend port); the
+  throwaway `tui` container instead defaults to `http://opencode:4096`, the
+  in-network service name. The health check (`_backend_healthy`) always uses
+  the 127.0.0.1 form.
+- `SD_YOLO` / `SD_YOLO_HOME` — without these the launcher requires the
+  workspace to be a subdirectory of `$HOME` (or of `SD_REPO_HOME` when
+  `SD_YOLO_HOME` is `true`) and prompts for confirmation otherwise. `SD_YOLO`
+  disables that check entirely. If you like extra security, this is a good
+  option to set.
+- `SD_READ_ONLY` — by default the launcher finds every `.git` directory inside
+  the workspace and mounts it read-only (`:ro`) via a generated compose
+  override file, so opencode can read git state but not corrupt it. Setting
+  `SD_READ_ONLY=false` (case-insensitive) disables this: the `.git` lookup and
+  override file are skipped and the workspace is mounted without the
+  read-only overlay. Useful when you need the container to be able to write
+  to `.git` (e.g. running your own git commands) or when the workspace sits on
+  a filesystem that does not support read-only bind mounts.
 
 ### Setting variables
 

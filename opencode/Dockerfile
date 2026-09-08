@@ -5,6 +5,7 @@ ARG OPENCODE_VERSION=latest
 ARG DEVCONTAINER_VERSION
 LABEL dev.snowdon.image.opencode.version="${OPENCODE_VERSION}"
 LABEL dev.snowdon.image.opencode.devcontainer="${DEVCONTAINER_VERSION}"
+LABEL dev.snowdon.opencode.managed=true
 
 ## TODO: handle any files left in /root from the opencode base
 

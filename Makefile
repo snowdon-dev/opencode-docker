@@ -15,6 +15,14 @@ BUILD_ARGS = \
 	--build-arg OPENCODE_VERSION=$(OPENCODE_VERSION) \
 	--build-arg DEVCONTAINER_VERSION=$(DEVCONTAINER_VERSION)
 
+.PHONY: check
+check:
+	shellcheck scripts/launcher.sh && \
+		shfmt -i 2 -w scripts/launcher.sh
+
+.PHONY: check-pipeline
+check-pipeline: check test
+
 build:
 	docker build \
 		$(BUILD_ARGS) \

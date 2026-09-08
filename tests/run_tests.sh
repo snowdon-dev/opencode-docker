@@ -41,7 +41,8 @@ make_sandbox() {
 # docker log. Nondeterministic temp paths (docker-compose.git.yml) are
 # normalised so assertions are stable.
 #   run_launcher <path-to-env-dotfile> <subcommand> [args...]
-# Globals written: LAUNCH_OUT (launcher+vars), DOCKER_LOG (normalised docker lines)
+# Globals written: LAUNCH_OUT (launcher+vars), LAUNCH_RC (exit code),
+# DOCKER_LOG (normalised docker lines)
 run_launcher() {
   local dotfile="$1"
   local cmd="$2"
@@ -64,6 +65,7 @@ run_launcher() {
 
   local out
   out="$(cd "$SD/ws" && bash "$LAUNCHER" "$cmd" "$@" 2>&1)"
+  LAUNCH_RC=$?
 
   # Keep only the launcher's own output lines, dropping mock echoes.
   LAUNCH_OUT="$(printf '%s\n' "$out" | grep -v '^mocked:' )"
@@ -172,11 +174,47 @@ $CBASE exec -T -w /workspace opencode npm install"
   assert_launcher_output_contains "Setting up opencode project: ws"
 }
 
+t_setup_build_fail() {
+  # setup when `compose up` fails (e.g. build failure) must abort and NOT run
+  # the dispatch command.
+  local rc=0
+  OPENCODE_TEST_BUILD_FAIL=1 run_launcher /dev/null setup "npm install"
+  rc=$LAUNCH_RC
+  assert_launcher_output_contains "Failed to start the opencode container"
+  if [[ "$rc" -eq 0 ]]; then
+    FAIL=$((FAIL+1)); FAILED_TESTS+=("$CURRENT:exit")
+    echo "  FAIL: setup did not exit non-zero after build failure"
+  else
+    PASS=$((PASS+1)); echo "  ok: setup exits non-zero after build failure"
+  fi
+  # Must NOT have attempted the dispatch (no ps/exec) after the failed up.
+  if grep -Fq "ps -q opencode" <<<"$DOCKER_LOG"; then
+    FAIL=$((FAIL+1)); FAILED_TESTS+=("$CURRENT:no_dispatch")
+    echo "  FAIL: dispatch ran despite build failure"
+  else
+    PASS=$((PASS+1)); echo "  ok: no dispatch after build failure"
+  fi
+}
+
 t_compose() {
   run_launcher /dev/null compose config --services
   assert_docker "$DINFO
 $CBASE config --services"
   assert_launcher_output_contains "Running Docker Compose for project: ws"
+}
+
+t_compose_no_readonly() {
+  # SD_READ_ONLY=false disables the read-only .git override: the generated
+  # docker-compose.git.yml must NOT be merged into the docker compose command.
+  # run_launcher sources the dotfile in the parent shell, so unset it again to
+  # avoid leaking into later tests.
+  local dotfile="$SD/readonly.env"
+  echo 'SD_READ_ONLY=false' >"$dotfile"
+  run_launcher "$dotfile" compose config --services
+  assert_docker "$DINFO
+docker compose -p ws -f $SD/compose/docker-compose.yml config --services"
+  assert_launcher_output_contains "Running Docker Compose for project: ws"
+  unset SD_READ_ONLY
 }
 
 t_start() {
@@ -217,6 +255,28 @@ t_new() {
   assert_launcher_output_contains "Starting fresh opencode container"
 }
 
+t_start_build_fail() {
+  # start when `compose up` fails (e.g. build failure) must abort rather than
+  # proceeding to the backend health check and attach.
+  local rc=0
+  OPENCODE_TEST_BUILD_FAIL=1 run_launcher /dev/null start --model gpt
+  rc=$LAUNCH_RC
+  assert_launcher_output_contains "Failed to start the opencode container"
+  if [[ "$rc" -eq 0 ]]; then
+    FAIL=$((FAIL+1)); FAILED_TESTS+=("$CURRENT:exit")
+    echo "  FAIL: start did not exit non-zero after build failure"
+  else
+    PASS=$((PASS+1)); echo "  ok: start exits non-zero after build failure"
+  fi
+  # Must NOT have attempted the backend health check or attach (no exec/attach).
+  if grep -Fq "opencode attach" <<<"$DOCKER_LOG"; then
+    FAIL=$((FAIL+1)); FAILED_TESTS+=("$CURRENT:no_attach")
+    echo "  FAIL: attach ran despite build failure"
+  else
+    PASS=$((PASS+1)); echo "  ok: no attach after build failure"
+  fi
+}
+
 t_shell() {
   # shell is a convenience alias for 'exec sh ...' in main().
   run_launcher /dev/null shell -c 'echo hi'
@@ -242,6 +302,57 @@ t_delete() {
   assert_docker_contains "docker ps -q -a --filter label=dev.snowdon.opencode.managed=true"
   assert_docker_contains "docker rm -f c1"
   assert_launcher_output_contains "Force-removing all opencode containers"
+}
+
+t_ls() {
+  # ls: discovers managed containers (including stopped) and prints them in a
+  # ps-style table built from per-container inspect records. The record format
+  # must separate fields with a Go string literal {{"\t"}} (docker inspect does
+  # not interpolate a raw \t, unlike docker ps).
+  run_launcher /dev/null ls
+  assert_docker_contains "docker ps -q -a --filter label=dev.snowdon.opencode.managed=true"
+  assert_docker_contains '{{"\t"}}'
+  assert_launcher_output_contains "CONTAINER ID"
+  assert_launcher_output_contains "STATUS"
+  assert_launcher_output_contains "WORKSPACE"
+  assert_launcher_output_contains "PROJECT"
+  assert_launcher_output_contains "c1"
+  assert_launcher_output_contains "running"
+  assert_launcher_output_contains "main"
+}
+
+t_ls_quiet() {
+  # ls --quiet prints only the short container ids, one per line.
+  run_launcher /dev/null ls --quiet
+  if [[ "$LAUNCH_OUT" == "c1" ]]; then
+    PASS=$((PASS+1)); echo "  ok: ls --quiet prints only container ids"
+  else
+    FAIL=$((FAIL+1)); FAILED_TESTS+=("$CURRENT:quiet")
+    echo "  FAIL: expected output 'c1', got:"
+    printf '%s\n' "$LAUNCH_OUT" | sed 's/^/    /'
+  fi
+}
+
+t_ls_scope() {
+  # A workspace argument scopes the listing with an extra label filter.
+  run_launcher /dev/null ls "$SD/ws"
+  assert_docker_contains "filter label=dev.snowdon.opencode.workspace=$SD/ws"
+  assert_docker_contains "docker ps -q -a --filter label=dev.snowdon.opencode.managed=true"
+}
+
+t_ls_no_containers() {
+  # With no managed containers, ls prints a helpful message (and nothing with
+  # --quiet).
+  OPENCODE_TEST_NO_CONTAINER=1 run_launcher /dev/null ls
+  assert_launcher_output_contains "No managed opencode containers"
+}
+
+t_ls_all() {
+  # --all also lists oneoff (throwaway 'compose run') containers: the docker ps
+  # call must use -a and include no oneoff filtering.
+  run_launcher /dev/null ls --all
+  assert_docker_contains "docker ps -q -a --filter label=dev.snowdon.opencode.managed=true"
+  assert_launcher_output_contains "CONTAINER ID"
 }
 
 t_changes() {
@@ -281,7 +392,7 @@ t_help() {
   run_launcher /dev/null help
   assert_launcher_output_contains "opencode launcher - manage the opencode container and sessions"
   assert_launcher_output_contains "Commands:"
-  for cmd in start new up setup stop delete exec down run shell scaffold changes compose help; do
+  for cmd in start new up setup stop delete ls exec down run shell scaffold changes compose help; do
     assert_launcher_output_contains "$cmd"
   done
 }

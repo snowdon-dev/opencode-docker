@@ -7,7 +7,8 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        OPENCODE_IMAGE_URL: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker}
+        OPENCODE_IMAGE_URL: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker:latest}
+        PROJECT_WORKSPACE: ${WORKSPACE:-${SD_OPENCODE}}
     # restart: unless-stopped
     entrypoint: ["/bin/sh", "-c"]
     command:
