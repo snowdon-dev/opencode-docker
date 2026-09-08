@@ -1,0 +1,5 @@
+services:
+  opencode:
+    volumes:
+      # python
+      - ${OPENCODE_PIP_CACHE_DIR:-${HOME}/.cache/pip}:/home/other/.cache/pip

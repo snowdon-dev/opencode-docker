@@ -22,6 +22,10 @@ _cleanup_scaffold_name=""
 _cleanup_scaffold_pid=""
 _cleanup_scaffold_output=""
 
+_cleanup_changes_name=""
+_cleanup_changes_pid=""
+_cleanup_changes_output=""
+
 declare -ga _cleanup_stack=()
 
 _cleanup_run() {
@@ -78,6 +82,24 @@ _print_readme() {
   echo '```'
 }
 
+_file_is_yml() {
+  local file="$1"
+  if [[ ! -f "$file" ]]; then
+    echo "Error: not a regular file: $file" >&2
+    return 1
+  fi
+
+  case "${file,,}" in
+  *.yml | *.yaml)
+    return 0
+    ;;
+  *)
+    echo "Error: Docker Compose file must have a .yml or .yaml extension: $file" >&2
+    return 1
+    ;;
+  esac
+}
+
 # Prepares the Docker Compose arguments. This function sets up the project
 # configuration including network settings and git directory mounts.
 _opencode_args_prepare() {
@@ -93,7 +115,27 @@ _opencode_args_prepare() {
   )
 
   # TODO: Transient volumes - OPENCODE_DATA=false disables persisted volume
-  # OPENCODE_CACHE=false disables the cache volumes
+  # OPENCODE_CACHE=false disables the cache volumes, "all" adds all
+  # "go python" adds go and python. Values are case-insensitive.
+  if [[ -n "${OPENCODE_CACHE}" ]]; then
+    if [[ "${OPENCODE_CACHE,,}" == "all" ]]; then
+      args_out+=(-f "$compose_dir/docker-compose.cache.yml")
+    elif [[ "${OPENCODE_CACHE,,}" == "false" ]]; then
+      echo "Running container without toolchain cache"
+    else
+      for id in ${OPENCODE_CACHE,,}; do
+        case "$id" in
+        go | node | python | rust)
+          args_out+=(-f "$compose_dir/docker-compose.$id.yml")
+          ;;
+        *)
+          echo "Error: unknown toolchain cache id: $id (valid ids: all, go, node, python, rust)" >&2
+          exit 1
+          ;;
+        esac
+      done
+    fi
+  fi
 
   # Add network configuration if OPENCODE_NETWORK environment variable is set
   if [[ -n "${OPENCODE_NETWORK:-}" ]]; then
@@ -103,20 +145,11 @@ _opencode_args_prepare() {
 
   # mount any user defined compose files and merge them
   for file in $OPENCODE_COMPOSE; do
-    if [[ ! -f "$file" ]]; then
-      echo "Error: not a regular file: $file" >&2
+    if _file_is_yml "$file"; then
+      args_out+=(-f "$file")
+    else
       exit 1
     fi
-
-    case "${file,,}" in
-    *.yml | *.yaml)
-      args_out+=(-f "$file")
-      ;;
-    *)
-      echo "Error: Docker Compose file must have a .yml or .yaml extension: $file" >&2
-      exit 1
-      ;;
-    esac
   done
 
   # By default .git directories are mounted read-only to protect them from
@@ -354,6 +387,27 @@ _cleanup_scaffold() {
   fi
 }
 
+_cleanup_changes() {
+  if [[ -n "$_cleanup_changes_pid" ]]; then
+    kill -KILL "$_cleanup_changes_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$_cleanup_changes_name" ]]; then
+    if ! docker rm -f -v "$_cleanup_changes_name" >/dev/null 2>&1; then
+      # Name may be stale or docker busy: force-kill, retry, then report.
+      docker kill "$_cleanup_changes_name" >/dev/null 2>&1 || true
+      if ! docker rm -f "$_cleanup_changes_name" >/dev/null 2>&1; then
+        echo "WARNING: could not remove changes container $_cleanup_changes_name" >&2
+        echo "  run: docker rm -f $_cleanup_changes_name" >&2
+        docker ps -a --filter "name=oc-changes-" \
+          --format '  {{.ID}}  {{.Names}}  {{.Status}}' >&2 || true
+      fi
+    fi
+  fi
+  if [[ -n "$_cleanup_changes_output" ]]; then
+    rm -f -- "$_cleanup_changes_output"
+  fi
+}
+
 # Main function to start and run opencode in a Docker container
 # This function creates and executes the opencode container with proper
 # workspace configuration and environment isolation.
@@ -388,6 +442,10 @@ opencode() {
 
   # ensure cleanup afterwards
   cleanup_add _cleanup_opencode_backend
+
+  # TODO: don't expose the port on the host unless required, then one backend
+  # cannot talk to another projects backend, this will be helpfull if multiple
+  # containers are enabled
 
   # start or resuse and existing container for the workspace
   if ! _backend_healthy; then
@@ -942,12 +1000,31 @@ $task
 
 "
 
+  # background this and capture
+  local cname="oc-changes-$$"
+  local outfile status
+  outfile="$(mktemp "${TMPDIR:-/tmp}/opencode-changes.XXXXXX")" || return 1
+
+  _cleanup_changes_name="$cname"
+  _cleanup_changes_output="$outfile"
+  _cleanup_changes_pid=""
+  cleanup_add _cleanup_changes
+
   # Run a non-interactive opencode session using the built-in plan agent. The
   # plan agent restricts edit/bash to "ask", so it analyses the code and
   # proposes a plan without modifying the working tree. Output streams to the
   # terminal (interactive dispatch), reusing the running container when present.
   printf '%s' "$prompt" | _opencode_dispatch 0 \
-    opencode run --agent plan --auto "$@"
+    opencode run --agent plan --auto "$@" >"$outfile" 2>&1 &
+  _cleanup_changes_pid=$!
+
+  ## Stream the captured output to the terminal
+  tail -f "$outfile" &
+  local _tail_pid=$!
+  wait "$_cleanup_changes_pid"
+  status=$?
+  kill "$_tail_pid" 2>/dev/null || true
+  return "$status"
 }
 
 # Print detailed help for a single command.
@@ -1284,6 +1361,9 @@ main() {
     return 0
     ;;
   esac
+
+  # TODO: if OPENCODE_WORKSPACE env is set, then we can use then over workspace
+  # when no argument is provided
 
   # Get the workspace directory from arguments or current directory
   local ws_out

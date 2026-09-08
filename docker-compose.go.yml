@@ -1,0 +1,6 @@
+services:
+  opencode:
+    volumes:
+      # go
+      - ${OPENCODE_GO_BUILD_CACHE_DIR:-${HOME}/.cache/go-build}:/home/other/.cache/go-build
+      - ${OPENCODE_GO_MOD_CACHE_DIR:-${HOME}/go/pkg/mod}:/home/other/go/pkg/mod

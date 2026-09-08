@@ -75,6 +75,7 @@ run_launcher() {
   DOCKER_LOG="$(sed -E \
     -e 's#-f [^ ]*docker-compose\.git\.yml#-f <tmp>/docker-compose.git.yml#g' \
     -e 's/oc-scaffold-[0-9]+/oc-scaffold-<pid>/g' \
+    -e 's/oc-changes-[0-9]+/oc-changes-<pid>/g' \
     "$OPENCODE_TEST_DOCKER_LOG")"
 }
 
@@ -215,6 +216,55 @@ t_compose_no_readonly() {
 docker compose -p ws -f $SD/compose/docker-compose.yml config --services"
   assert_launcher_output_contains "Running Docker Compose for project: ws"
   unset SD_READ_ONLY
+}
+
+t_cache_all() {
+  # OPENCODE_CACHE=all mounts every toolchain cache via docker-compose.cache.yml.
+  echo 'services: { opencode: {} }' >"$SD/compose/docker-compose.cache.yml"
+  local dotfile="$SD/cache.env"
+  echo 'OPENCODE_CACHE=all' >"$dotfile"
+  run_launcher "$dotfile" compose config --services
+  assert_docker "$DINFO
+docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/docker-compose.cache.yml -f <tmp>/docker-compose.git.yml config --services"
+  unset OPENCODE_CACHE
+}
+
+t_cache_ids() {
+  # Space-separated ids (case-insensitive) add only those override files.
+  echo 'services: { opencode: {} }' >"$SD/compose/docker-compose.go.yml"
+  echo 'services: { opencode: {} }' >"$SD/compose/docker-compose.python.yml"
+  local dotfile="$SD/cache.env"
+  echo 'OPENCODE_CACHE="Go PYTHON"' >"$dotfile"
+  run_launcher "$dotfile" compose config --services
+  assert_docker "$DINFO
+docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/docker-compose.go.yml -f $SD/compose/docker-compose.python.yml -f <tmp>/docker-compose.git.yml config --services"
+  unset OPENCODE_CACHE
+}
+
+t_cache_false() {
+  # OPENCODE_CACHE=false mounts no toolchain caches.
+  local dotfile="$SD/cache.env"
+  echo 'OPENCODE_CACHE=false' >"$dotfile"
+  run_launcher "$dotfile" compose config --services
+  assert_docker "$DINFO
+$CBASE config --services"
+  assert_launcher_output_contains "Running container without toolchain cache"
+  unset OPENCODE_CACHE
+}
+
+t_cache_unknown() {
+  # An unknown cache id aborts with a clear error listing valid ids.
+  local dotfile="$SD/cache.env"
+  echo 'OPENCODE_CACHE=bogus' >"$dotfile"
+  run_launcher "$dotfile" compose config --services
+  assert_launcher_output_contains "Error: unknown toolchain cache id: bogus (valid ids: all, go, node, python, rust)"
+  if [[ "$LAUNCH_RC" -eq 0 ]]; then
+    FAIL=$((FAIL+1)); FAILED_TESTS+=("$CURRENT:exit")
+    echo "  FAIL: unknown cache id did not exit non-zero"
+  else
+    PASS=$((PASS+1)); echo "  ok: unknown cache id exits non-zero"
+  fi
+  unset OPENCODE_CACHE
 }
 
 t_start() {

@@ -204,6 +204,11 @@ chown -R 1000:1000 "$WORKSPACE"
 > that directory instead and `chown -R 1000:1000` it. Do not run these commands
 > with `sudo` unless the directories live outside your home directory.
 
+> The toolchain cache directories (`pip`, `npm`, `go`, `rust`/`sccache`) are
+> only mounted when you enable them with `OPENCODE_CACHE` (they are opt-in for
+> security). If you leave `OPENCODE_CACHE` unset you can skip creating and
+> chowning those directories.
+
 ## Environment variables
 
 ### Compose variables
@@ -232,6 +237,18 @@ default pointing at the conventional location under your home directory
 The container-side paths are fixed: they must match the user baked into the
 image (`other`, uid/gid 1000, see `opencode/Dockerfile`).
 
+The toolchain cache mounts (`OPENCODE_PIP_CACHE_DIR`, `OPENCODE_NPM_CACHE_DIR`,
+`OPENCODE_GO_BUILD_CACHE_DIR`, `OPENCODE_GO_MOD_CACHE_DIR`,
+`OPENCODE_CARGO_REGISTRY_DIR`, `OPENCODE_CARGO_GIT_DIR`,
+`OPENCODE_SCCACHE_DIR`) are **not** mounted by default. They are defined in the
+dedicated override files `docker-compose.python.yml`, `docker-compose.node.yml`,
+`docker-compose.go.yml`, `docker-compose.rust.yml` (and the combined
+`docker-compose.cache.yml`), which the launcher only merges in when
+`OPENCODE_CACHE` is set — see below. This is a deliberate, security-first
+breaking change: toolchain caches hold executable artifacts that get run inside
+the container, so they are no longer mounted unconditionally. Opt into exactly
+the toolchains you need.
+
 ### Launcher variables
 
 These variables are read by `scripts/launcher.sh` from the shell environment
@@ -240,6 +257,7 @@ These variables are read by `scripts/launcher.sh` from the shell environment
 | Variable                   | Default                    | Effect                                              |
 |----------------------------|----------------------------|-----------------------------------------------------|
 | `OPENCODE_COMPOSE`         | –                          | Space-separated extra `docker compose` files, merged into the project via `-f` |
+| `OPENCODE_CACHE`           | –                          | Toolchain cache mounts to enable: `false` (default) none, `all` every cache, or space-separated ids (`go`, `node`, `python`, `rust`) |
 | `OPENCODE_BACKEND_ORIGIN`  | `http://127.0.0.1:4096`    | Backend URL used for the health check and TUI attach |
 | `SD_YOLO`                  | –                          | `true` (case-insensitive) skips the outside-`HOME` workspace check |
 | `SD_YOLO_HOME`             | –                          | `true` validates workspaces against `SD_REPO_HOME` instead of `$HOME` |
@@ -251,6 +269,18 @@ Details:
   `.yaml` extension; anything else aborts the launcher. The files are passed
   to `docker compose -f` alongside the base and (optional) network/git
   override files.
+- `OPENCODE_CACHE` — controls which host toolchain cache directories are
+  mounted into the container. Unset or `false` mounts none (the security-first
+  default). `all` mounts every toolchain cache via `docker-compose.cache.yml`.
+  A space-separated list of case-insensitive ids mounts only those, each
+  defined in a dedicated override file: `python` (`docker-compose.python.yml`,
+  pip cache), `node` (`docker-compose.node.yml`, npm cache), `go`
+  (`docker-compose.go.yml`, go build + module cache), `rust`
+  (`docker-compose.rust.yml`, cargo registry + git + sccache). Any unknown id
+  aborts the launcher. This is a breaking change: the toolchain caches used to
+  be mounted by default and are now opt-in, because cached toolchain artifacts
+  are executed inside the container. Example:
+  `export OPENCODE_CACHE="go rust"`.
 - `OPENCODE_BACKEND_ORIGIN` — when a host `opencode` binary is on the `PATH`,
   the default is `http://127.0.0.1:4096` (the published backend port); the
   throwaway `tui` container instead defaults to `http://opencode:4096`, the
