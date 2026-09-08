@@ -18,10 +18,9 @@ FROM ${OPENCODE_IMAGE_URL}
 ARG PROJECT_WORKSPACE
 LABEL dev.snowdon.opencode.workspace="${PROJECT_WORKSPACE}"
 
+#USER root
 # apk add --no-cache jq
 # apk add --no-cache \
 #   wget yq neovim iproute2 bind-tools netcat-openbsd 
-
-USER root
-RUN apk add shellcheck shfmt
-USER other
+#RUN apk add shellcheck shfmt
+#USER other
