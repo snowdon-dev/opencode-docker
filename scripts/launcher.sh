@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 SD_OPENCODE="${SD_OPENCODE:-$HOME/opencode}"
+SD_REPO_HOME="${SD_REPO_HOME:-/home/$USER/repos}"
 MANAGE_LABEL="dev.snowdon.opencode.managed"
 WORKSPACE_LABEL="dev.snowdon.opencode.workspace"
 LABEL_CONTAINER_PROJECT_NAME="com.docker.compose.project"
@@ -12,14 +13,27 @@ LABEL_NETWORK_WORKSPACE="dev.snowdon.opencode.workspace"
 TUI_LABEL="dev.snowdon.opencode.tui"
 IMAGE_URL="${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker:latest}"
 LOOPBACK="127.0.0.1"
+COMPOSE_NET_DIR="$SD_OPENCODE/compose-net"
+COMPOSE_VOL_DIR="$SD_OPENCODE/compose-vol"
+DOCKER_ARGS="${DOCKER_ARGS:-}"
 
-COMPOSE_NET_DIR="${SD_OPENCODE:-$HOME/opencode}/compose-net"
-COMPOSE_VOL_DIR="${SD_OPENCODE:-$HOME/opencode}/compose-vol"
+# Range for managed docker networks: an explicit CIDR ("172.20.0.0/16"), or a
+# bare prefix whose mask is implied at 8 bits per octet ("172.20" -> /16).
+NETWORK_RANGE="${OPENCODE_NET_RANGE:-172.20.0.0/16}"
+# Mask of each network created inside the range (a /16 range slices into 256 /24s).
+NET_SUBNET_MASK="${OPENCODE_NET_SUBNET:-24}"
 
+# Parsed NETWORK_RANGE: 32-bit network address and prefix length, set by _net_parse.
+net_base=""
+net_mask=""
+
+PROJECT_NAME=""
 OPENCODE_ARGS=""
 
 tmp_compose_dir=""
 tmp_compose_file=""
+
+network_name=""
 
 _cleanup_scaffold_name=""
 _cleanup_scaffold_pid=""
@@ -46,6 +60,175 @@ trap _cleanup_run EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# allow passing arbitrary args to docker
+docker_exec() {
+  local -a docker_args=()
+  if [[ -n ${DOCKER_ARGS:-} ]]; then
+    read -r -a docker_args <<<"$DOCKER_ARGS"
+  fi
+  docker "${docker_args[@]}" "$@"
+}
+
+# Parse OPENCODE_NET_RANGE, either an explicit CIDR ("172.20.0.0/16") or a
+# bare prefix ("172.20" whose mask is implied at 8 bits per octet), into the
+# globals net_base (32-bit network address) and net_mask (prefix length).
+_net_parse() {
+  local addr="${NETWORK_RANGE%%/*}"
+  local mask="${NETWORK_RANGE##*/}"
+  local -a octs
+  IFS='.' read -r -a octs <<<"$addr"
+
+  if ((${#octs[@]} < 1 || ${#octs[@]} > 4)); then
+    echo "error: OPENCODE_NET_RANGE must have 1-4 octets (e.g. 172.20 or 172.20.0.0/16)" >&2
+    return 1
+  fi
+  local o
+  for ((o = 0; o < ${#octs[@]}; o++)); do
+    if [[ ! "${octs[o]}" =~ ^[0-9]{1,3}$ ]] || ((10#${octs[o]} > 255)); then
+      echo "error: invalid octet in OPENCODE_NET_RANGE: ${octs[o]}" >&2
+      return 1
+    fi
+  done
+
+  # A bare prefix has no "/mask" so infer 8 bits per given octet (172.20 -> /16)
+  # capping at /24
+  if [[ "$NETWORK_RANGE" != */* ]]; then
+    mask=$((${#octs[@]} * 8))
+    ((mask > 24)) && mask=24
+  fi
+  if [[ ! "$mask" =~ ^[0-9]{1,2}$ ]] || ((mask < 1 || mask > 24)); then
+    echo "error: OPENCODE_NET_RANGE mask must be between /1 and /24" >&2
+    return 1
+  fi
+
+  local v=0
+  for ((o = 0; o < 4; o++)); do
+    ((v = (v << 8) | ${octs[o]:-0}))
+  done
+
+  net_mask=$mask
+  # zero the host bits
+  ((net_base = v & (0xFFFFFFFF << (32 - mask))))
+
+  return 0
+}
+
+int_to_ip4() {
+  local v="$(($1 & 0xFFFFFFFF))"
+  printf '%d.%d.%d.%d' \
+    $(((v >> 24) & 255)) \
+    $(((v >> 16) & 255)) \
+    $(((v >> 8) & 255)) \
+    $((v & 255))
+}
+
+find_free_network() {
+  if ! _net_parse; then
+    return 1
+  fi
+
+  if [[ ! "$NET_SUBNET_MASK" =~ ^[0-9]{1,2}$ ]] ||
+    ((NET_SUBNET_MASK < 1 || NET_SUBNET_MASK > 24)); then
+    echo "error: OPENCODE_NET_SUBNET must be between /1 and /24" >&2
+    return 1
+  fi
+
+  declare -A used_networks
+
+  local -a networks
+  mapfile -t networks < <(docker_exec network ls -q)
+
+  while IFS= read -r subnet; do
+    [[ -z "$subnet" ]] && continue
+    used_networks["$subnet"]=1
+  done < <(
+    docker_exec network inspect "${networks[@]}" \
+      --format '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}'
+  )
+
+  # Slice the range into fixed-size subnets. When subnets are smaller than
+  # the range the index selects the slice bits (e.g. a /16 range slices into
+  # 256 x /24); a subnet mask no larger than the range mask yields a single
+  # subnet (index 0).
+  local count
+  if ((NET_SUBNET_MASK > net_mask)); then
+    ((count = 1 << (NET_SUBNET_MASK - net_mask)))
+  else
+    count=1
+  fi
+
+  # Randomize the search order so concurrent projects are less likely to
+  # collide on the same subnet.  count is always a power of 2 (1 << free_bits),
+  # so any odd step is coprime to it, guaranteeing every slot is visited exactly
+  # once.  Combine two $RANDOM values (each 0-32767) for a wider range.
+  local start=0 step=1
+  if ((count > 1)); then
+    ((start = ((RANDOM << 15) | RANDOM) % count))
+    ((step = 1 + 2 * (((RANDOM << 15) | RANDOM) % (count / 2))))
+  fi
+
+  local i idx addr a b c d
+  for ((i = 0; i < count; i++)); do
+    ((idx = (start + i * step) % count))
+    ((addr = net_base | (idx << (32 - NET_SUBNET_MASK))))
+    ((a = (addr >> 24) & 255))
+    ((b = (addr >> 16) & 255))
+    ((c = (addr >> 8) & 255))
+    ((d = addr & 255))
+    subnet="$a.$b.$c.$d/$NET_SUBNET_MASK"
+    if [[ -z "${used_networks[$subnet]+x}" ]]; then
+      printf '%s' "$subnet"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+docker_network_builder() {
+  local available_subnet nid
+  local proj="$1"
+  local workspace="$2"
+
+  # find existing network
+  nid=$(
+    docker_exec network ls -q \
+      --filter "label=$LABEL_NETWORK_MANAGED=true" \
+      --filter "label=$LABEL_NETWORK_WORKSPACE=$workspace"
+  )
+  if [[ -n "$nid" ]]; then
+    if network_name=$(docker_exec network inspect "$nid" \
+      --format '{{.Name}}' 2>/dev/null); then
+      return 0
+    else
+      echo "Failed to inspect existing network"
+      return 1
+    fi
+  fi
+
+  # create a new network
+  # TODO: Project name conflict - proj name is derived from basename, mighe have conflicts
+  network_name="sd-$proj-default"
+
+  available_subnet="$(find_free_network)" || {
+    echo "No free subnet available" >&2
+    return 1
+  }
+
+  # TODO: create network as a compose network, not external
+  docker_exec network create --driver bridge \
+    --subnet="$available_subnet" \
+    --label="$LABEL_NETWORK_MANAGED=true" \
+    --label="$LABEL_NETWORK_WORKSPACE=$workspace" \
+    "$network_name" >/dev/null 2>&1 || {
+    # Failure: A project with name ($PROJECT_NAME) already existed and is active?
+    echo "Network failed to create with name ($PROJECT_NAME)"
+    return 1
+  }
+
+  return 0
+}
+
 # clean up time main files with the docker compose merge
 _cleanup() {
   if [[ -n "$tmp_compose_dir" && -d "$tmp_compose_dir" ]]; then
@@ -55,7 +238,7 @@ _cleanup() {
 
 # print a message about the current git details of the cwd
 _print_git_context() {
-  if command -v git &>/dev/null; then
+  if ! command -v git &>/dev/null; then
     return
   fi
   if [[ ! -d .git ]]; then
@@ -103,17 +286,30 @@ _assert_file_is_yml() {
   esac
 }
 
+docker_network_name() {
+  local name="$1"
+
+  name="${name,,}"               # lowercase
+  name="${name//[^a-z0-9_.-]/-}" # invalid chars -> -
+  while [[ "$name" == *--* ]]; do
+    name="${name//--/-}"
+  done
+  name="${name#[-._]}"
+  name="${name%[-._]}"
+
+  printf '%s\n' "$name"
+}
+
 # Prepares the Docker Compose arguments. This function sets up the project
 # configuration including network settings and git directory mounts.
 _opencode_args_prepare() {
   local ws_out="$1"
-  local proj_out="$2"
-  local -n args_out="$3"
+  local -n args_out="$2"
 
   local compose_dir="${SD_OPENCODE:-$HOME/opencode}"
   # Build Docker Compose arguments starting with the main compose file
   args_out=(
-    -p "$proj_out"
+    -p "$PROJECT_NAME"
     -f "$compose_dir/docker-compose.yml"
   )
 
@@ -142,10 +338,26 @@ _opencode_args_prepare() {
     fi
   fi
 
-  # Add network configuration if OPENCODE_NETWORK environment variable is set
-  if [[ -n "${OPENCODE_NETWORK:-}" ]]; then
+  # default to using compose default network but add labels to it, merge config
+  # Add network configuration if OPENCODE_NETWORK environment or use custom default
+  if [[ "$OPENCODE_NETWORK" == "@default" ]]; then
+    # default to using a custom workspace
+    # TODO: Project name conflict - proj name is derived from basename, might have conflicts
+    local proj_name
+    proj_name="$(docker_network_name "$PROJECT_NAME")"
+    docker_network_builder "$proj_name" "$ws_out" || {
+      echo "Failed to create or find network for project: $proj_name" >&2
+      return 1
+    }
+    OPENCODE_NETWORK="$network_name"
+    export OPENCODE_NETWORK
     args_out+=(-f "$COMPOSE_NET_DIR/docker-compose.network.yml")
     echo "Using network: $OPENCODE_NETWORK"
+  elif [[ -n "$OPENCODE_NETWORK" ]]; then
+    args_out+=(-f "$COMPOSE_NET_DIR/docker-compose.network.yml")
+    echo "Using network: $OPENCODE_NETWORK"
+  else
+    echo "Using default network"
   fi
 
   # mount any user defined compose files and merge them
@@ -218,17 +430,17 @@ _opencode_args_prepare() {
 # commands don't disturb an existing session. Only the explicit recreate
 # commands (start/new) pass --recreate.
 _opencode_ensure_up() {
-  local recreate=0
-  if [[ "${1:-}" == "--recreate" ]]; then
-    recreate=1
-    shift
-  fi
+  #local recreate=0
+  #if [[ "${1:-}" == "--recreate" ]]; then
+  #  recreate=1
+  #  shift
+  #fi
 
-  if ((recreate)); then
-    docker compose "${OPENCODE_ARGS[@]}" up -d opencode
-  else
-    docker compose "${OPENCODE_ARGS[@]}" up -d --no-recreate opencode
-  fi
+  #if ((recreate)); then
+  docker_exec compose "${OPENCODE_ARGS[@]}" up -d opencode
+  #else
+  #  docker_exec compose "${OPENCODE_ARGS[@]}" up -d --no-recreate opencode
+  #fi
 }
 
 # Run a one-off task against the opencode service without disturbing any
@@ -248,20 +460,20 @@ _opencode_dispatch() {
   shift
 
   local running
-  running="$(docker compose "${OPENCODE_ARGS[@]}" ps -q opencode)"
+  running="$(docker_exec compose "${OPENCODE_ARGS[@]}" ps -q opencode)"
 
   if [[ -n "$running" ]]; then
     # Use the already-running container. Without -T (interactive) output streams
     # straight to the terminal; with -T it can be captured by the caller.
     if ((interactive)); then
-      docker compose "${OPENCODE_ARGS[@]}" exec -w /workspace opencode "$@"
+      docker_exec compose "${OPENCODE_ARGS[@]}" exec -w /workspace opencode "$@"
     else
-      docker compose "${OPENCODE_ARGS[@]}" exec -T -w /workspace opencode "$@"
+      docker_exec compose "${OPENCODE_ARGS[@]}" exec -T -w /workspace opencode "$@"
     fi
   else
     # No running container: use a throwaway container that runs the task and
     # exits, publishing no ports.
-    docker compose "${OPENCODE_ARGS[@]}" \
+    docker_exec compose "${OPENCODE_ARGS[@]}" \
       run --rm \
       -w /workspace \
       --entrypoint /bin/sh \
@@ -280,12 +492,12 @@ _opencode_dispatch() {
 # inherited ws/proj, the OPENCODE_ARGS array, and $@ for trailing args.
 _opencode_ctx() {
   local fn="$1"
-  local ws="$2"
-  local proj="$3"
+  WORKSPACE="$2"
+  PROJECT_NAME="$3"
   shift 3
 
   local -a args=()
-  _opencode_args_prepare "$ws" "$proj" args || return 1
+  _opencode_args_prepare "$WORKSPACE" args || return 1
   cleanup_add _cleanup
 
   OPENCODE_ARGS=("${args[@]}")
@@ -295,8 +507,8 @@ _opencode_ctx() {
     trap _cleanup_run EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    cd "$ws" || exit 1
-    export WORKSPACE="$ws"
+    cd "$WORKSPACE" || exit 1
+    export WORKSPACE
     "$fn" "$@"
   )
 }
@@ -323,12 +535,12 @@ _find_docker_managed() {
     esac
   done
   local id rec oneoff istui
-  docker ps -q $stopped \
+  docker_exec ps -q $stopped \
     --filter "label=$MANAGE_LABEL=true" \
     ${ws_filter:+--filter "label=$WORKSPACE_LABEL=$ws_filter"} 2>/dev/null | while read -r id; do
     if [ "$include_oneoff" -eq 0 ]; then
       rec="$(
-        docker inspect \
+        docker_exec inspect \
           --format '{{index .Config.Labels "'"$LABEL_ONE_OFF"'"}}{{"\t"}}{{index .Config.Labels "'"$TUI_LABEL"'"}}{{"\t"}}.' \
           "$id" 2>/dev/null
       )"
@@ -342,7 +554,7 @@ _find_docker_managed() {
 }
 
 _find_workspace() {
-  docker inspect \
+  docker_exec inspect \
     --format "{{index .Config.Labels \"$WORKSPACE_LABEL\"}}" \
     "$1" 2>/dev/null
 }
@@ -355,14 +567,16 @@ _run_opencode_executable() {
   else
     local BACKEND_ORIGIN="${OPENCODE_BACKEND_ORIGIN:-http://opencode:4096}"
     # this need to be able to pass info to healthy, without a port
-    docker compose "${OPENCODE_ARGS[@]}" run --rm --remove-orphans tui \
+    docker_exec compose "${OPENCODE_ARGS[@]}" run \
+      --rm --remove-orphans \
+      tui \
       attach "$BACKEND_ORIGIN" \
       "$@"
   fi
 }
 
 _cleanup_opencode_backend() {
-  docker compose "${OPENCODE_ARGS[@]}" exec \
+  docker_exec compose "${OPENCODE_ARGS[@]}" exec \
     opencode pkill -f 'opencode serve' || true
 }
 
@@ -376,13 +590,13 @@ _cleanup_scaffold() {
     kill -KILL "$_cleanup_scaffold_pid" 2>/dev/null || true
   fi
   if [[ -n "$_cleanup_scaffold_name" ]]; then
-    if ! docker rm -f -v "$_cleanup_scaffold_name" >/dev/null 2>&1; then
+    if ! docker_exec rm -f -v "$_cleanup_scaffold_name" >/dev/null 2>&1; then
       # Name may be stale or docker busy: force-kill, retry, then report.
-      docker kill "$_cleanup_scaffold_name" >/dev/null 2>&1 || true
-      if ! docker rm -f "$_cleanup_scaffold_name" >/dev/null 2>&1; then
+      docker_exec kill "$_cleanup_scaffold_name" >/dev/null 2>&1 || true
+      if ! docker_exec rm -f "$_cleanup_scaffold_name" >/dev/null 2>&1; then
         echo "WARNING: could not remove scaffold container $_cleanup_scaffold_name" >&2
         echo "  run: docker rm -f $_cleanup_scaffold_name" >&2
-        docker ps -a --filter "name=oc-scaffold-" \
+        docker_exec ps -a --filter "name=oc-scaffold-" \
           --format '  {{.ID}}  {{.Names}}  {{.Status}}' >&2 || true
       fi
     fi
@@ -397,13 +611,13 @@ _cleanup_changes() {
     kill -KILL "$_cleanup_changes_pid" 2>/dev/null || true
   fi
   if [[ -n "$_cleanup_changes_name" ]]; then
-    if ! docker rm -f -v "$_cleanup_changes_name" >/dev/null 2>&1; then
+    if ! docker_exec rm -f -v "$_cleanup_changes_name" >/dev/null 2>&1; then
       # Name may be stale or docker busy: force-kill, retry, then report.
-      docker kill "$_cleanup_changes_name" >/dev/null 2>&1 || true
-      if ! docker rm -f "$_cleanup_changes_name" >/dev/null 2>&1; then
+      docker_exec kill "$_cleanup_changes_name" >/dev/null 2>&1 || true
+      if ! docker_exec rm -f "$_cleanup_changes_name" >/dev/null 2>&1; then
         echo "WARNING: could not remove changes container $_cleanup_changes_name" >&2
         echo "  run: docker rm -f $_cleanup_changes_name" >&2
-        docker ps -a --filter "name=oc-changes-" \
+        docker_exec ps -a --filter "name=oc-changes-" \
           --format '  {{.ID}}  {{.Names}}  {{.Status}}' >&2 || true
       fi
     fi
@@ -431,7 +645,7 @@ opencode() {
     # map, whereas .Labels from 'ps --format' can surface as a slice (indexing
     # a slice by string then fails), depending on the docker/compose build.
     conflict_ws="$(_find_workspace "$conflict_id")"
-    if [[ -n "$conflict_ws" && "$conflict_ws" != "$ws" ]]; then
+    if [[ -n "$conflict_ws" && "$conflict_ws" != "$WORKSPACE" ]]; then
       echo "Container already running for workspace $conflict_ws." >&2
       echo "Run 'opencode:down $conflict_ws' first, or use 'opencode:new' to" >&2
       echo "automatically remove the existing container." >&2
@@ -455,7 +669,7 @@ opencode() {
   # start or resuse and existing container for the workspace
   if ! _backend_healthy; then
     # Start the handler in the background
-    docker compose "${OPENCODE_ARGS[@]}" exec \
+    docker_exec compose "${OPENCODE_ARGS[@]}" exec \
       -d \
       -w /workspace \
       opencode opencode serve \
@@ -489,7 +703,7 @@ opencode() {
   _run_opencode_executable "$@"
 
   # Verify container status after execution
-  container_id="$(docker compose "${OPENCODE_ARGS[@]}" ps -q -a opencode)"
+  container_id="$(docker_exec compose "${OPENCODE_ARGS[@]}" ps -q -a opencode)"
   if [[ -z "$container_id" ]]; then
     echo "The container was removed: $container_id"
     exit 1
@@ -503,7 +717,7 @@ opencode() {
 # This function runs interactive commands within a running container
 # without creating a new container instance.
 opencode:exec() {
-  echo "Executing in opencode project: $proj ($ws)"
+  echo "Executing in opencode project: $PROJECT_NAME ($WORKSPACE)"
 
   # Ensure the container is running before executing commands
   #_opencode_ensure_up
@@ -515,7 +729,7 @@ opencode:exec() {
   fi
 
   # Execute command interactively in the running container
-  docker compose "${OPENCODE_ARGS[@]}" exec -it opencode "$@"
+  docker_exec compose "${OPENCODE_ARGS[@]}" exec -it opencode "$@"
 }
 
 # Run a task (e.g. 'npm install' or 'go build') inside the opencode service.
@@ -524,7 +738,7 @@ opencode:exec() {
 # running the task runs inside it (leaving it running); otherwise a throwaway
 # `compose run` container runs the task and exits, publishing no ports.
 opencode:run() {
-  echo "Running in opencode project: $proj ($ws)"
+  echo "Running in opencode project: $PROJECT_NAME ($WORKSPACE)"
 
   if [ "$#" -gt 0 ]; then
     echo "Running command in the container"
@@ -542,7 +756,7 @@ opencode:run() {
 # throwaway `compose run` container, then returns to the user shell while
 # leaving any pre-existing container running for later work.
 opencode:setup() {
-  echo "Setting up opencode project: $proj ($ws)"
+  echo "Setting up opencode project: $PROJECT_NAME ($WORKSPACE)"
 
   _opencode_ensure_up || {
     echo "Failed to start the opencode container" >&2
@@ -560,7 +774,7 @@ opencode:setup() {
 # This function provides direct access to Docker Compose functionality
 # for advanced container management operations.
 opencode:compose() {
-  echo "Running Docker Compose for project: $proj ($ws)"
+  echo "Running Docker Compose for project: $PROJECT_NAME ($WORKSPACE)"
 
   if [ "$#" == 0 ]; then
     echo "No arguments were provided."
@@ -569,7 +783,7 @@ opencode:compose() {
   fi
 
   # Pass all arguments directly to Docker Compose
-  docker compose "${OPENCODE_ARGS[@]}" "$@"
+  docker_exec compose "${OPENCODE_ARGS[@]}" "$@"
 }
 
 # Update the opencode launcher installation.
@@ -584,11 +798,14 @@ opencode:update() {
   (
     cd "$SD_OPENCODE" || exit 1
 
+    trap 'kill 0; exit 130' INT
+    trap 'kill 0; exit 143' TERM
+
     # Pull the 'tui' service image (the only service with an explicit image:).
-    docker compose pull
+    docker_exec compose pull
 
     # Build the 'opencode' image, refreshing the base FROM image first.
-    docker compose build --pull
+    docker_exec compose build --pull
   )
 }
 
@@ -597,23 +814,23 @@ opencode:update() {
 # then stops any remaining managed containers (e.g. the TUI one-off) scoped to
 # the workspace, while preserving the workspace configuration.
 opencode:down() {
-  echo "Stopping opencode project: $proj ($ws)"
+  echo "Stopping opencode project: $PROJECT_NAME ($WORKSPACE)"
   # docker compose down does not remove one-off containers created via
   # 'compose run' (like the TUI). Stop any remaining managed containers
   # scoped to this workspace.
-  opencode:stop "$ws"
+  opencode:stop "$WORKSPACE"
 
   # Stop and remove containers, networks, and volumes
-  docker compose "${OPENCODE_ARGS[@]}" down
+  docker_exec compose "${OPENCODE_ARGS[@]}" down
 }
 
 # Start the opencode container without running any processes in it.
 # This is useful to keep the container alive in the background so it can be
 # attached to later with 'opencode:exec' without the overhead of creating it.
 opencode:up() {
-  echo "Starting opencode container: $proj ($ws)"
+  echo "Starting opencode container: $PROJECT_NAME ($WORKSPACE)"
 
-  docker compose "${OPENCODE_ARGS[@]}" up -d opencode "$@"
+  docker_exec compose "${OPENCODE_ARGS[@]}" up -d opencode "$@"
 
   # TODO: start the backend?
 }
@@ -621,8 +838,10 @@ opencode:up() {
 # Create a new opencode project scaffold with git initialization
 # This function sets up a new project workspace with proper configuration
 # and launches the opencode runner to begin development.
-# NOTE: Project name is derived from basename only, which may cause naming
+#
+# TODO: Project name conflict - is derived from basename only, which may cause naming
 # conflicts when different directories share the same final component.
+#
 # For example: /home/user/repos/gists/one and /home/user/repos/projects/one
 # both become project name "one". A future improvement should use a sanitized
 # version of the full relative path to ensure uniqueness while maintaining
@@ -639,7 +858,7 @@ opencode:scaffold() {
     exit 1
   fi
 
-  echo "Running on opencode project: $proj ($ws)"
+  echo "Running on opencode project: $PROJECT_NAME ($WORKSPACE)"
 
   # Configure CPU resources for the container
   local cpus="${OPENCODE_CPUSET:-2-3}"
@@ -652,11 +871,11 @@ opencode:scaffold() {
 You are creating the inital project scaffold.
 The inital project information is as follows.
 You have access to the CPUSET: $cpus
-/workspace is the project: $proj 
+/workspace is the project: $PROJECT_NAME 
 Working directory: /workspace
 Workspace contents of /workspace:
 \`\`\`
-$(ls -la "$ws")
+$(ls -la "$WORKSPACE")
 \`\`\`
 $(_print_readme)
 $(_print_git_context)
@@ -686,7 +905,7 @@ Your task is as follows:
 
   # Execute opencode with context information
   printf '%s%s' "$tmp_context" "$task" |
-    docker compose "${OPENCODE_ARGS[@]}" \
+    docker_exec compose "${OPENCODE_ARGS[@]}" \
       run --rm -T --name "$cname" opencode 'exec opencode run "$@"' \
       opencode --auto "$@" >"$outfile" 2>&1 &
   _cleanup_scaffold_pid=$!
@@ -707,7 +926,7 @@ Your task is as follows:
 opencode:new() {
   opencode:stop
 
-  echo "Starting fresh opencode container for project: $proj"
+  echo "Starting fresh opencode container for project: $PROJECT_NAME"
   opencode "$@"
 }
 
@@ -741,12 +960,12 @@ opencode:stop() {
   while read -r id; do
     [[ -z "$id" ]] && continue
     ws_label="$(_find_workspace "$id")"
-    if [[ -n "$ws_label" && "$ws_label" != "$ws" ]]; then
+    if [[ -n "$ws_label" && "$ws_label" != "$WORKSPACE" ]]; then
       echo "Stopping managed container $id (workspace: $ws_label)"
     else
       echo "Stopping managed container $id"
     fi
-    docker stop "$id"
+    docker_exec stop "$id"
   done < <(_find_docker_managed "${find_args[@]}")
 }
 
@@ -782,15 +1001,15 @@ opencode:delete() {
   while read -r id; do
     [[ -z "$id" ]] && continue
     ws_label="$(_find_workspace "$id")"
-    if [[ -n "$ws_label" && "$ws_label" != "$ws" ]]; then
+    if [[ -n "$ws_label" && "$ws_label" != "$WORKSPACE" ]]; then
       echo "Force-removing managed container $id (workspace: $ws_label)"
     else
       echo "Force-removing managed container $id"
     fi
-    docker rm -f "$id"
+    docker_exec rm -f "$id"
   done < <(_find_docker_managed "${find_args[@]}")
 
-  if [ $all -eq 1 ]; then
+  if [ "$all" -eq 1 ]; then
     # remove the images
     local filter_images=(
       --filter "label=$LABEL_DEV_CONTAINER"
@@ -799,8 +1018,12 @@ opencode:delete() {
     if [[ -n "$ws_scope" ]]; then
       filter_images+=(--filter "label=$LABEL_IMAGE_WORKSPACE=$ws_scope")
     fi
-    docker image ls -q "${filter_images[@]}" |
-      xargs -r docker image rm
+
+    local -a images
+    mapfile -t images < <(docker_exec image ls -q "${filter_images[@]}")
+    if ((${#images[@]})); then
+      docker_exec image rm "${images[@]}"
+    fi
 
     # remove the networks
     local filters_network=()
@@ -811,8 +1034,12 @@ opencode:delete() {
     if [[ -n "$ws_scope" ]]; then
       filters_network+=(--filter "label=$LABEL_NETWORK_WORKSPACE=$ws_scope")
     fi
-    docker network ls -q "${filters_network[@]}" |
-      xargs -r docker network rm
+    local -a networks
+    mapfile -t networks < <(docker_exec network ls -q "${filters_network[@]}")
+
+    if ((${#networks[@]})); then
+      docker_exec network rm "${networks[@]}"
+    fi
   fi
 }
 
@@ -856,7 +1083,7 @@ opencode:ls() {
   while read -r id; do
     [[ -z "$id" ]] && continue
     rec="$(
-      docker inspect \
+      docker_exec inspect \
         --format '{{.ID}}{{"\t"}}{{.State.Status}}{{"\t"}}{{index .Config.Labels "'"$WORKSPACE_LABEL"'"}}{{"\t"}}{{index .Config.Labels "'"$LABEL_CONTAINER_PROJECT_NAME"'"}}{{"\t"}}{{index .Config.Labels "'"$LABEL_ONE_OFF"'"}}{{"\t"}}{{index .Config.Labels "'"$TUI_LABEL"'"}}{{"\t"}}.' \
         "$id" 2>/dev/null
     )"
@@ -926,7 +1153,7 @@ opencode:ls() {
 # then runs `opencode run --agent plan` so it analyses the code and proposes a
 # plan without making any changes. Output streams to the user's terminal.
 opencode:changes() {
-  echo "Analyzing changes for project: $proj ($ws)"
+  echo "Analyzing changes for project: $PROJECT_NAME ($WORKSPACE)"
 
   # Run the git analysis against the existing container when it is running,
   # otherwise a throwaway `compose run` container; either way the returned
@@ -991,7 +1218,7 @@ opencode:changes() {
   shift || true
 
   local prompt="<task-information>
-Project: $proj
+Project: $PROJECT_NAME
 Working directory: /workspace
 Branch changes:
 \`\`\`
@@ -1226,18 +1453,18 @@ opencode:help() {
   echo "Run '$0 <command> --help' for details on a specific command."
   echo "Run '$0 <command> -h'     for details on a specific command."
 
-  if docker image inspect "$IMAGE_URL" >/dev/null 2>&1; then
+  if docker_exec image inspect "$IMAGE_URL" >/dev/null 2>&1; then
     echo
     local opencode_version
     local devcontainer_version
 
     opencode_version="$(
-      docker image inspect "$IMAGE_URL" \
+      docker_exec image inspect "$IMAGE_URL" \
         --format '{{ index .Config.Labels "dev.snowdon.image.opencode.version" }}'
     )"
 
     devcontainer_version="$(
-      docker image inspect "$IMAGE_URL" \
+      docker_exec image inspect "$IMAGE_URL" \
         --format '{{ index .Config.Labels "dev.snowdon.image.opencode.devcontainer" }}'
     )"
 
@@ -1302,8 +1529,7 @@ _maybe_check_outside_home() {
       read -r -p "Continue anyway? [y/N] " answer </dev/tty
 
       case ${answer,,} in
-      y | yes)
-        ;;
+      y | yes) ;;
       *)
         printf 'Aborted.\n' >&2
         exit 1
@@ -1339,7 +1565,7 @@ main() {
   fi
 
   # Just exit if there is no docker
-  if ! docker info >/dev/null 2>&1; then
+  if ! docker_exec info >/dev/null 2>&1; then
     echo "Docker daemon is not running" >&2
     echo "Try something like: sudo systemctl start docker"
     exit 1
@@ -1401,7 +1627,7 @@ main() {
         ws_out="$name"
       else
         # under the SD_REPO_HOME root
-        ws_out="${SD_REPO_HOME:-/home/$USER/repos}/$name"
+        ws_out="${SD_REPO_HOME}/$name"
       fi
       shift
 
@@ -1433,7 +1659,7 @@ main() {
 
   # when argument one is a path starting with / or ./ capture it as the ws_out,
   # else we use the cwd.
-  if [[ ! -n ${ws_out+x} ]]; then
+  if [[ -z ${ws_out+x} ]]; then
     if [[ "$1" == ./* || "$1" == /* ]] && [[ -d $1 ]]; then
       ws_out="$(realpath "$1")"
       shift
@@ -1447,7 +1673,6 @@ main() {
   _maybe_check_outside_home "$ws_out"
 
   # Set up compose directory and project name
-  local compose_dir="${SD_OPENCODE:-$HOME/opencode}"
   local proj
   proj="$(basename "$ws_out")"
 

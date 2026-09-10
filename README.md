@@ -52,8 +52,9 @@ mkdir "$HOME/repos/gists/gotester" && cd "$HOME/repos/gists/gotester"
 oc:sf ./ "Create a hello world go project."
 oc:sf ./newmodule "Create a golang package that exports a function that adds integers. No go.mod"
 
-OPENCODE_IMAGE_URL="my-custom-image" opencode
+OPENCODE_IMAGE_URL="my-custom-image:latest" opencode
 OPENCODE_NETWORK="custom-network" opencode
+OPENCODE_NETWORK="@default" opencode
 
 # start the container already ready to go
 cd ~/project
@@ -71,6 +72,7 @@ opencode:setup sh -c 'cd front-end && npm install' && opencode
   mount a tmp_dir
 - [x] Security: Path prompt check when outside `$HOME`, or `$SD_REPO_HOME` when
   `$SD_YOLO_HOME` equals true
+- [x] Security: Defined per-workspace Docker networks with automatic subnet allocation
 - [x] Security: Auto update. Pin tools to any security updates. Github workflow
 - [x] [Docker](https://www.docker.com/) base container for opencode work
 - [x] Convenience launcher script
@@ -79,6 +81,8 @@ opencode:setup sh -c 'cd front-end && npm install' && opencode
 - [x] [Add github build - docker step by step guide](https://docs.docker.com/guides/gha/)
 - [x] Prevent large arguments leaks and enable task via std
 - [x] Allow easy mounting of the config dir
+- [ ] Build image from a workspace path instead of the same /Dockerfile in the
+  opencode root. Point at a folder for the workspace, and a context at the workspace
 - [ ] Layered containers - full(rust, go, c, node, python) - duck(node, python)
   empty.
 - [ ] Layered containers - [development containers spec](https://containers.dev/implementors/spec/)
@@ -116,7 +120,7 @@ after a new release.
 
 You should use the opencode launcher utility to launch the container, as it
 needs environment variables (like WORKSPACE) to init properly. See the
-[oh-my-zsh](#oh-my-zsh) plugin.
+[oh-my-zsh](#oh-my-zsh-plugin) plugin.
 
 ```sh
 docker compose up -d opencode
@@ -274,6 +278,9 @@ These variables are read by `scripts/launcher.sh` from the shell environment
 | `SD_YOLO`                  | –                          | `true` (case-insensitive) skips the outside-`HOME` workspace check |
 | `SD_YOLO_HOME`             | –                          | `true` validates workspaces against `SD_REPO_HOME` instead of `$HOME` |
 | `SD_READ_ONLY`             | –                          | `false` (case-insensitive) skips the read-only `.git` override file |
+| `OPENCODE_NET_RANGE`       | `172.20.0.0/16`                  | – (IP range for managed networks)  |
+| `OPENCODE_NET_SUBNET`      | `24`                             | – (subnet mask for individual networks) |
+| `DOCKER_ARGS`              | –                                | – (extra args passed to all docker commands) |
 
 Details:
 
@@ -314,6 +321,64 @@ Details:
   to `.git` (e.g. running your own git commands) or when the workspace sits on
   a filesystem that does not support read-only bind mounts.
 
+### Network isolation
+
+The launcher supports three network modes controlled by `OPENCODE_NETWORK`:
+
+1. **Unset (default)** — no external network is attached; the container uses
+   Docker's default bridge network. Services on different workspaces can see
+   each other unless you explicitly isolate them.
+
+2. **`@default` (recommended)** — the launcher automatically creates a
+   workspace-scoped bridge network named `sd-<project>-default` and attaches
+   it to both the `opencode` and `tui` services. The subnet is allocated from
+   the managed IP range, ensuring each workspace is isolated by default.
+
+   ```sh
+   OPENCODE_NETWORK="@default" opencode
+   # or in .env
+   OPENCODE_NETWORK=@default
+   ```
+
+   The network is reused across restarts: the launcher checks for an existing
+   network labeled with the workspace before creating a new one. Cleanup
+   happens via `opencode:delete --all` or `docker network rm`.
+
+3. **Named network** — pass any existing Docker network name to attach both
+   services to that network. Useful when you want multiple workspaces (or
+   external services) to share a network:
+
+   ```sh
+   OPENCODE_NETWORK="my-shared-net" opencode
+   ```
+
+#### Subnet allocation
+
+When using `@default`, the launcher allocates subnets from a configurable IP
+range. Two variables control allocation:
+
+| Variable               | Default           | Effect                                                  |
+|------------------------|-------------------|---------------------------------------------------------|
+| `OPENCODE_NET_RANGE`   | `172.20.0.0/16`   | CIDR or bare prefix defining the managed IP range       |
+| `OPENCODE_NET_SUBNET`  | `24`              | Subnet mask for each workspace network                  |
+
+`OPENCODE_NET_RANGE` accepts both full CIDR notation (`172.20.0.0/16`) and
+shorthand prefixes (`172.20` — the mask is inferred as 8 bits per octet, capped
+at `/24`). A `/16` range provides 256 non-overlapping `/24` subnets (each
+yielding 254 usable host addresses).
+
+The launcher iterates through the sliced subnets and selects the first one not
+already in use by any existing Docker network. If all subnets are occupied, the
+launcher exits with an error.
+
+```sh
+# Use a different range
+OPENCODE_NET_RANGE="10.10.0.0/16" OPENCODE_NET_SUBNET="24" opencode
+
+# Use a smaller slice inside the default range
+OPENCODE_NET_RANGE="172.20.0.0/16" OPENCODE_NET_SUBNET="28" opencode
+```
+
 ### Setting variables
 
 Variables can be set in two ways, with the following precedence:
@@ -349,6 +414,42 @@ OPENCODE_CARGO_REGISTRY_DIR=/mnt/usb2/storage/opencode/cache/rust/crate-registry
 OPENCODE_CARGO_GIT_DIR=/mnt/usb2/storage/opencode/cache/rust/cargo-git
 OPENCODE_SCCACHE_DIR=/mnt/usb2/storage/opencode/cache/rust/sccache
 ```
+
+## Start extending with custom functions
+
+```shell
+gist() {
+  local name=$1
+  shift
+
+  local tmp_path="$HOME/repos/gists/$name"
+  cd "$tmp_path" || {
+    if (( $# == 0 )); then
+      printf 'Warning:\nDirectory does not exist\nNo scaffold description was provided.\n' >&2
+      echo "mkdir: $tmp_path"
+      mkdir "$tmp_path"
+      echo "cd:    $tmp_path"
+      cd "$tmp_path"
+      echo 'run:   opencode:scaffold ./ "Your task"'
+      return
+    fi
+
+    mkdir "$tmp_path"
+    cd "$tmp_path" || exit 1
+
+    if which git > /dev/null; then
+      git init
+      echo "# $name" > README.md
+      git add README.md
+      git commit -m "Initial commit."
+    fi
+
+    opencode:scaffold ./ "$@"
+  }
+}
+```
+
+Please share your extensions in the discussions section.
 
 ## Build
 
@@ -453,57 +554,6 @@ requests (or emailed patches) rather than keeping modified versions private.
 By submitting, you agree your contributions are licensed under the same
 license as the project (GPL-3.0-or-later). Keep PRs focused; one logical
 change per request.
-
-## Notes
-
-- Make sure host cache directories exist and are writable by the container:
-  mounts targeting `/home/other/...` run as uid 1000, while `/root/...` targets
-  (pip, npm) are written as root.
-- `docker-compose.git.yml` mounts the workspace's `.git` directories read-only
-  and `compose-net/docker-compose.network.yml` attaches an external network
-  (`OPENCODE_NETWORK`); both overlay the base file via `-f`.
-- The compose file bind-mounts the host config directory
-  (`OPENCODE_CONFIG_DIR`, default `$HOME/.config/opencode`) at
-  `/home/other/.config`, and mounts this repository's `opencode/agent.md`
-read-only over the container's AGENTS.md
-   (`/home/other/.config/opencode/AGENTS.md`). Edit the file to customize the
-   system prompt the agents run under.
-
-### Start extending with custom functions
-
-```shell
-gist() {
-  local name=$1
-  shift
-
-  local tmp_path="$HOME/repos/gists/$name"
-  cd "$tmp_path" || {
-    if (( $# == 0 )); then
-      printf 'Warning:\nDirectory does not exist\nNo scaffold description was provided.\n' >&2
-      echo "mkdir: $tmp_path"
-      mkdir "$tmp_path"
-      echo "cd:    $tmp_path"
-      cd "$tmp_path"
-      echo 'run:   opencode:scaffold ./ "Your task"'
-      return
-    fi
-
-    mkdir "$tmp_path"
-    cd "$tmp_path" || exit 1
-
-    if which git > /dev/null; then
-      git init
-      echo "# $name" > README.md
-      git add README.md
-      git commit -m "Initial commit."
-    fi
-
-    opencode:scaffold ./ "$@"
-  }
-}
-```
-
-Please share your extensions in the discussions section.
 
 ## License
 

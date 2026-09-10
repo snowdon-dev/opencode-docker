@@ -166,10 +166,10 @@ $CBASE run --rm -w /workspace --entrypoint /bin/sh opencode -c exec \"\$@\" sh n
 }
 
 t_setup() {
-  # setup calls _opencode_ensure_up (no-recreate) first, then _opencode_dispatch.
+  # setup calls _opencode_ensure_up (up -d) first, then _opencode_dispatch.
   run_launcher /dev/null setup "npm install"
   assert_docker "$DINFO
-$CBASE up -d --no-recreate opencode
+$CBASE up -d opencode
 $CBASE ps -q opencode
 $CBASE exec -T -w /workspace opencode npm install"
   assert_launcher_output_contains "Setting up opencode project: ws"
@@ -268,11 +268,11 @@ t_cache_unknown() {
 }
 
 t_start() {
-  # start: conflict check -> ensure_up (no-recreate) -> backend health (mocked
+  # start: conflict check -> ensure_up (up -d) -> backend health (mocked
   # curl returns ok, so serve is skipped) -> attach via mocked opencode -> ps.
   run_launcher /dev/null start --model gpt
   assert_docker_contains "docker ps -q --filter label=dev.snowdon.opencode.managed=true"
-  assert_docker_contains "$CBASE up -d --no-recreate opencode"
+  assert_docker_contains "$CBASE up -d opencode"
   assert_docker_contains "opencode attach http://127.0.0.1:4096 --model gpt"
   assert_docker_contains "$CBASE ps -q -a opencode"
   assert_launcher_output_contains "Backend ready. Attaching..."
@@ -300,7 +300,7 @@ t_new() {
   run_launcher /dev/null new "do something"
   assert_docker_contains "docker ps -q --filter label=dev.snowdon.opencode.managed=true"
   assert_docker_contains "docker stop c1"
-  assert_docker_contains "$CBASE up -d --no-recreate opencode"
+  assert_docker_contains "$CBASE up -d opencode"
   assert_docker_contains "opencode attach http://127.0.0.1:4096 do something"
   assert_launcher_output_contains "Starting fresh opencode container"
 }

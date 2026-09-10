@@ -16,6 +16,8 @@ services:
     labels:
       - "dev.snowdon.opencode.managed=true"
       - "dev.snowdon.opencode.workspace=${WORKSPACE}"
+    networks:
+      - extra-network
     volumes:
       - ${WORKSPACE:-${SD_OPENCODE}}:/workspace
       - /etc/localtime:/etc/localtime:ro
@@ -38,3 +40,11 @@ services:
       - "dev.snowdon.opencode.managed=true"
       - "dev.snowdon.opencode.tui=true"
       - "dev.snowdon.opencode.workspace=${WORKSPACE}"
+    networks:
+      - extra-network
+
+networks:
+  extra-network:
+    labels:
+      dev.snowdon.opencode.managed: true
+      dev.snowdon.opencode.workspace: "${WORKSPACE}"

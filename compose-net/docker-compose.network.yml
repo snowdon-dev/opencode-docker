@@ -2,6 +2,9 @@ services:
   opencode:
     networks:
       - extra-network
+  tui:
+    networks:
+      - extra-network
 
 networks:
   extra-network:
