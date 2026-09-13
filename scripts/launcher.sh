@@ -60,6 +60,40 @@ trap _cleanup_run EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# --- container driver init ---------------------------------------------------
+# Container engine driver. Only 'docker' is implemented today; 'podman' is
+# reserved for a future driver (the podman_<op> functions are stubs). 'auto'
+# prefers docker, falling back to podman when docker is absent.
+SD_DRIVER="${SD_DRIVER:-auto}"
+DRIVER=""
+case "${SD_DRIVER,,}" in
+docker)
+  DRIVER=docker
+  ;;
+podman)
+  DRIVER=podman
+  ;;
+auto)
+  if command -v docker >/dev/null 2>&1; then
+    DRIVER=docker
+  elif command -v podman >/dev/null 2>&1; then
+    DRIVER=podman
+  else
+    echo "error: SD_DRIVER=auto found neither docker nor podman on PATH" >&2
+    exit 1
+  fi
+  ;;
+*)
+  echo "error: unknown SD_DRIVER: $SD_DRIVER (valid: auto, docker, podman)" >&2
+  exit 1
+  ;;
+esac
+
+if [[ "$DRIVER" == "podman" ]]; then
+  echo "error: the podman driver is not implemented yet; only docker is supported" >&2
+  exit 1
+fi
+
 # allow passing arbitrary args to docker
 docker_exec() {
   local -a docker_args=()
@@ -69,6 +103,69 @@ docker_exec() {
   docker "${docker_args[@]}" "$@"
 }
 
+# Dispatch an operation to the active driver's implementation:
+#   _driver <op> [args...]  ->  runs ${DRIVER}_<op> <args...>
+# Every operation is implemented as docker_<op> and (for future drivers)
+# <driver>_<op>, so adding a driver only means adding those functions.
+_driver() {
+  local op="$1"
+  shift
+  "${DRIVER}_${op}" "$@"
+}
+
+# --- docker driver -------------------------------------------------------
+# Wraps docker_exec (which prepends DOCKER_ARGS) for every operation the
+# launcher needs. The podman_<op> stubs below mark the future driver's shape.
+
+docker_info() { docker_exec info; }
+docker_compose() { docker_exec compose "$@"; }
+docker_network_ls() { docker_exec network ls "$@"; }
+docker_network_subnets() {
+  docker_exec network inspect "$@" \
+    --format '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}'
+}
+docker_network_name() { docker_exec network inspect "$1" --format '{{.Name}}'; }
+docker_network_create() {
+  local name="$1" subnet="$2" workspace="$3"
+  docker_exec network create \
+    --driver bridge \
+    --subnet="$subnet" \
+    --label="$LABEL_NETWORK_MANAGED=true" \
+    --label="$LABEL_NETWORK_WORKSPACE=$workspace" \
+    "$name"
+}
+docker_network_rm() { docker_exec network rm "$@"; }
+docker_container_ls() { docker_exec ps "$@"; }
+docker_container_inspect() { docker_exec inspect "$@"; }
+docker_container_rm() { docker_exec rm "$@"; }
+docker_container_kill() { docker_exec kill "$@"; }
+docker_container_stop() { docker_exec stop "$@"; }
+docker_image_ls() { docker_exec image ls "$@"; }
+docker_image_rm() { docker_exec image rm "$@"; }
+docker_image_inspect() { docker_exec image inspect "$@"; }
+
+# --- podman driver (stubs: not implemented yet) --------------------------
+_podman_stub() {
+  echo "error: podman driver: '$1' not implemented yet" >&2
+  return 1
+}
+podman_info() { _podman_stub info; }
+podman_compose() { _podman_stub compose; }
+podman_network_ls() { _podman_stub network_ls; }
+podman_network_subnets() { _podman_stub network_subnets; }
+podman_network_name() { _podman_stub network_name; }
+podman_network_create() { _podman_stub network_create; }
+podman_network_rm() { _podman_stub network_rm; }
+podman_container_ls() { _podman_stub container_ls; }
+podman_container_inspect() { _podman_stub container_inspect; }
+podman_container_rm() { _podman_stub container_rm; }
+podman_container_kill() { _podman_stub container_kill; }
+podman_container_stop() { _podman_stub container_stop; }
+podman_image_ls() { _podman_stub image_ls; }
+podman_image_rm() { _podman_stub image_rm; }
+podman_image_inspect() { _podman_stub image_inspect; }
+
+# --- app code ----------------------------------------------------------------
 # Parse OPENCODE_NET_RANGE, either an explicit CIDR ("172.20.0.0/16") or a
 # bare prefix ("172.20" whose mask is implied at 8 bits per octet), into the
 # globals net_base (32-bit network address) and net_mask (prefix length).
@@ -92,6 +189,7 @@ _net_parse() {
 
   # A bare prefix has no "/mask" so infer 8 bits per given octet (172.20 -> /16)
   # capping at /24
+  # TODO: Cap can be increased to allow smaller OPENCODE_NET_SUBNET="28"
   if [[ "$NETWORK_RANGE" != */* ]]; then
     mask=$((${#octs[@]} * 8))
     ((mask > 24)) && mask=24
@@ -133,18 +231,19 @@ find_free_network() {
     return 1
   fi
 
-  declare -A used_networks
-
+  # Could replace this with a search for the chosen network to avoid
+  # loading all networks into memory. For the first N search results, we
+  # could inspect each one until we find a match. If no match is found,
+  # fall back to loading all networks into memory. This is probably only
+  # beneficial for small-to-medium numbers of networks; with a large
+  # number, we'd likely need to load them all anyway.
+  local -A used_networks
   local -a networks
-  mapfile -t networks < <(docker_exec network ls -q)
-
+  mapfile -t networks < <(_driver network_ls -q)
   while IFS= read -r subnet; do
     [[ -z "$subnet" ]] && continue
     used_networks["$subnet"]=1
-  done < <(
-    docker_exec network inspect "${networks[@]}" \
-      --format '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}'
-  )
+  done < <(_driver network_subnets "${networks[@]}")
 
   # Slice the range into fixed-size subnets. When subnets are smaller than
   # the range the index selects the slice bits (e.g. a /16 range slices into
@@ -185,20 +284,19 @@ find_free_network() {
   return 1
 }
 
-docker_network_builder() {
+_network_builder() {
   local available_subnet nid
   local proj="$1"
   local workspace="$2"
 
   # find existing network
   nid=$(
-    docker_exec network ls -q \
+    _driver network_ls -q \
       --filter "label=$LABEL_NETWORK_MANAGED=true" \
       --filter "label=$LABEL_NETWORK_WORKSPACE=$workspace"
   )
   if [[ -n "$nid" ]]; then
-    if network_name=$(docker_exec network inspect "$nid" \
-      --format '{{.Name}}' 2>/dev/null); then
+    if network_name=$(_driver network_name "$nid" 2>/dev/null); then
       return 0
     else
       echo "Failed to inspect existing network"
@@ -216,11 +314,8 @@ docker_network_builder() {
   }
 
   # TODO: create network as a compose network, not external
-  docker_exec network create --driver bridge \
-    --subnet="$available_subnet" \
-    --label="$LABEL_NETWORK_MANAGED=true" \
-    --label="$LABEL_NETWORK_WORKSPACE=$workspace" \
-    "$network_name" >/dev/null 2>&1 || {
+  _driver network_create "$network_name" "$available_subnet" "$workspace" \
+    >/dev/null 2>&1 || {
     # Failure: A project with name ($PROJECT_NAME) already existed and is active?
     echo "Network failed to create with name ($PROJECT_NAME)"
     return 1
@@ -286,7 +381,7 @@ _assert_file_is_yml() {
   esac
 }
 
-docker_network_name() {
+_sanitize_network_name() {
   local name="$1"
 
   name="${name,,}"               # lowercase
@@ -344,8 +439,8 @@ _opencode_args_prepare() {
     # default to using a custom workspace
     # TODO: Project name conflict - proj name is derived from basename, might have conflicts
     local proj_name
-    proj_name="$(docker_network_name "$PROJECT_NAME")"
-    docker_network_builder "$proj_name" "$ws_out" || {
+    proj_name="$(_sanitize_network_name "$PROJECT_NAME")"
+    _network_builder "$proj_name" "$ws_out" || {
       echo "Failed to create or find network for project: $proj_name" >&2
       return 1
     }
@@ -437,9 +532,9 @@ _opencode_ensure_up() {
   #fi
 
   #if ((recreate)); then
-  docker_exec compose "${OPENCODE_ARGS[@]}" up -d opencode
+  _driver compose "${OPENCODE_ARGS[@]}" up -d opencode
   #else
-  #  docker_exec compose "${OPENCODE_ARGS[@]}" up -d --no-recreate opencode
+  #  _driver compose "${OPENCODE_ARGS[@]}" up -d --no-recreate opencode
   #fi
 }
 
@@ -460,20 +555,20 @@ _opencode_dispatch() {
   shift
 
   local running
-  running="$(docker_exec compose "${OPENCODE_ARGS[@]}" ps -q opencode)"
+  running="$(_driver compose "${OPENCODE_ARGS[@]}" ps -q opencode)"
 
   if [[ -n "$running" ]]; then
     # Use the already-running container. Without -T (interactive) output streams
     # straight to the terminal; with -T it can be captured by the caller.
     if ((interactive)); then
-      docker_exec compose "${OPENCODE_ARGS[@]}" exec -w /workspace opencode "$@"
+      _driver compose "${OPENCODE_ARGS[@]}" exec -w /workspace opencode "$@"
     else
-      docker_exec compose "${OPENCODE_ARGS[@]}" exec -T -w /workspace opencode "$@"
+      _driver compose "${OPENCODE_ARGS[@]}" exec -T -w /workspace opencode "$@"
     fi
   else
     # No running container: use a throwaway container that runs the task and
     # exits, publishing no ports.
-    docker_exec compose "${OPENCODE_ARGS[@]}" \
+    _driver compose "${OPENCODE_ARGS[@]}" \
       run --rm \
       -w /workspace \
       --entrypoint /bin/sh \
@@ -535,12 +630,12 @@ _find_docker_managed() {
     esac
   done
   local id rec oneoff istui
-  docker_exec ps -q $stopped \
+  _driver container_ls -q $stopped \
     --filter "label=$MANAGE_LABEL=true" \
     ${ws_filter:+--filter "label=$WORKSPACE_LABEL=$ws_filter"} 2>/dev/null | while read -r id; do
     if [ "$include_oneoff" -eq 0 ]; then
       rec="$(
-        docker_exec inspect \
+        _driver container_inspect \
           --format '{{index .Config.Labels "'"$LABEL_ONE_OFF"'"}}{{"\t"}}{{index .Config.Labels "'"$TUI_LABEL"'"}}{{"\t"}}.' \
           "$id" 2>/dev/null
       )"
@@ -554,7 +649,7 @@ _find_docker_managed() {
 }
 
 _find_workspace() {
-  docker_exec inspect \
+  _driver container_inspect \
     --format "{{index .Config.Labels \"$WORKSPACE_LABEL\"}}" \
     "$1" 2>/dev/null
 }
@@ -567,7 +662,7 @@ _run_opencode_executable() {
   else
     local BACKEND_ORIGIN="${OPENCODE_BACKEND_ORIGIN:-http://opencode:4096}"
     # this need to be able to pass info to healthy, without a port
-    docker_exec compose "${OPENCODE_ARGS[@]}" run \
+    _driver compose "${OPENCODE_ARGS[@]}" run \
       --rm --remove-orphans \
       tui \
       attach "$BACKEND_ORIGIN" \
@@ -576,7 +671,7 @@ _run_opencode_executable() {
 }
 
 _cleanup_opencode_backend() {
-  docker_exec compose "${OPENCODE_ARGS[@]}" exec \
+  _driver compose "${OPENCODE_ARGS[@]}" exec \
     opencode pkill -f 'opencode serve' || true
 }
 
@@ -590,13 +685,13 @@ _cleanup_scaffold() {
     kill -KILL "$_cleanup_scaffold_pid" 2>/dev/null || true
   fi
   if [[ -n "$_cleanup_scaffold_name" ]]; then
-    if ! docker_exec rm -f -v "$_cleanup_scaffold_name" >/dev/null 2>&1; then
-      # Name may be stale or docker busy: force-kill, retry, then report.
-      docker_exec kill "$_cleanup_scaffold_name" >/dev/null 2>&1 || true
-      if ! docker_exec rm -f "$_cleanup_scaffold_name" >/dev/null 2>&1; then
+    if ! _driver container_rm -f -v "$_cleanup_scaffold_name" >/dev/null 2>&1; then
+      # Name may be stale or the engine busy: force-kill, retry, then report.
+      _driver container_kill "$_cleanup_scaffold_name" >/dev/null 2>&1 || true
+      if ! _driver container_rm -f "$_cleanup_scaffold_name" >/dev/null 2>&1; then
         echo "WARNING: could not remove scaffold container $_cleanup_scaffold_name" >&2
-        echo "  run: docker rm -f $_cleanup_scaffold_name" >&2
-        docker_exec ps -a --filter "name=oc-scaffold-" \
+        echo "  run: $DRIVER_BIN rm -f $_cleanup_scaffold_name" >&2
+        _driver container_ls -a --filter "name=oc-scaffold-" \
           --format '  {{.ID}}  {{.Names}}  {{.Status}}' >&2 || true
       fi
     fi
@@ -611,13 +706,13 @@ _cleanup_changes() {
     kill -KILL "$_cleanup_changes_pid" 2>/dev/null || true
   fi
   if [[ -n "$_cleanup_changes_name" ]]; then
-    if ! docker_exec rm -f -v "$_cleanup_changes_name" >/dev/null 2>&1; then
-      # Name may be stale or docker busy: force-kill, retry, then report.
-      docker_exec kill "$_cleanup_changes_name" >/dev/null 2>&1 || true
-      if ! docker_exec rm -f "$_cleanup_changes_name" >/dev/null 2>&1; then
+    if ! _driver container_rm -f -v "$_cleanup_changes_name" >/dev/null 2>&1; then
+      # Name may be stale or the engine busy: force-kill, retry, then report.
+      _driver container_kill "$_cleanup_changes_name" >/dev/null 2>&1 || true
+      if ! _driver container_rm -f "$_cleanup_changes_name" >/dev/null 2>&1; then
         echo "WARNING: could not remove changes container $_cleanup_changes_name" >&2
-        echo "  run: docker rm -f $_cleanup_changes_name" >&2
-        docker_exec ps -a --filter "name=oc-changes-" \
+        echo "  run: $DRIVER_BIN rm -f $_cleanup_changes_name" >&2
+        _driver container_ls -a --filter "name=oc-changes-" \
           --format '  {{.ID}}  {{.Names}}  {{.Status}}' >&2 || true
       fi
     fi
@@ -669,7 +764,7 @@ opencode() {
   # start or resuse and existing container for the workspace
   if ! _backend_healthy; then
     # Start the handler in the background
-    docker_exec compose "${OPENCODE_ARGS[@]}" exec \
+    _driver compose "${OPENCODE_ARGS[@]}" exec \
       -d \
       -w /workspace \
       opencode opencode serve \
@@ -703,7 +798,7 @@ opencode() {
   _run_opencode_executable "$@"
 
   # Verify container status after execution
-  container_id="$(docker_exec compose "${OPENCODE_ARGS[@]}" ps -q -a opencode)"
+  container_id="$(_driver compose "${OPENCODE_ARGS[@]}" ps -q -a opencode)"
   if [[ -z "$container_id" ]]; then
     echo "The container was removed: $container_id"
     exit 1
@@ -729,7 +824,7 @@ opencode:exec() {
   fi
 
   # Execute command interactively in the running container
-  docker_exec compose "${OPENCODE_ARGS[@]}" exec -it opencode "$@"
+  _driver compose "${OPENCODE_ARGS[@]}" exec -it opencode "$@"
 }
 
 # Run a task (e.g. 'npm install' or 'go build') inside the opencode service.
@@ -739,6 +834,8 @@ opencode:exec() {
 # `compose run` container runs the task and exits, publishing no ports.
 opencode:run() {
   echo "Running in opencode project: $PROJECT_NAME ($WORKSPACE)"
+
+  # TODO: Background so it can be canceled
 
   if [ "$#" -gt 0 ]; then
     echo "Running command in the container"
@@ -783,7 +880,7 @@ opencode:compose() {
   fi
 
   # Pass all arguments directly to Docker Compose
-  docker_exec compose "${OPENCODE_ARGS[@]}" "$@"
+  _driver compose "${OPENCODE_ARGS[@]}" "$@"
 }
 
 # Update the opencode launcher installation.
@@ -802,10 +899,10 @@ opencode:update() {
     trap 'kill 0; exit 143' TERM
 
     # Pull the 'tui' service image (the only service with an explicit image:).
-    docker_exec compose pull
+    _driver compose pull
 
     # Build the 'opencode' image, refreshing the base FROM image first.
-    docker_exec compose build --pull
+    _driver compose build --pull
   )
 }
 
@@ -821,7 +918,7 @@ opencode:down() {
   opencode:stop "$WORKSPACE"
 
   # Stop and remove containers, networks, and volumes
-  docker_exec compose "${OPENCODE_ARGS[@]}" down
+  _driver compose "${OPENCODE_ARGS[@]}" down
 }
 
 # Start the opencode container without running any processes in it.
@@ -830,7 +927,7 @@ opencode:down() {
 opencode:up() {
   echo "Starting opencode container: $PROJECT_NAME ($WORKSPACE)"
 
-  docker_exec compose "${OPENCODE_ARGS[@]}" up -d opencode "$@"
+  _driver compose "${OPENCODE_ARGS[@]}" up -d opencode "$@"
 
   # TODO: start the backend?
 }
@@ -847,12 +944,7 @@ opencode:up() {
 # version of the full relative path to ensure uniqueness while maintaining
 # Docker Compose naming compatibility (lowercase, hyphens only).
 opencode:scaffold() {
-  if (($# >= 1)); then
-    task=$1
-    shift 1
-  elif [[ ! -t 0 ]]; then
-    task=$(cat)
-  else
+  if (($# != 1)) && [[ -t 0 ]]; then
     echo "Error: no task provided" >&2
     _opencode_help_cmd "scaffold"
     exit 1
@@ -904,10 +996,16 @@ Your task is as follows:
   cleanup_add _cleanup_scaffold
 
   # Execute opencode with context information
-  printf '%s%s' "$tmp_context" "$task" |
-    docker_exec compose "${OPENCODE_ARGS[@]}" \
-      run --rm -T --name "$cname" opencode 'exec opencode run "$@"' \
-      opencode --auto "$@" >"$outfile" 2>&1 &
+  {
+    printf '%s' "$tmp_context"
+    if [ "$#" -gt 0 ]; then
+      printf '%s' "$1"
+    else
+      cat
+    fi
+  } | _driver compose "${OPENCODE_ARGS[@]}" \
+    run --rm -T --name "$cname" opencode 'exec opencode run "$@"' \
+    opencode --auto "$@" >"$outfile" 2>&1 &
   _cleanup_scaffold_pid=$!
 
   # Stream the captured output to the terminal
@@ -965,7 +1063,7 @@ opencode:stop() {
     else
       echo "Stopping managed container $id"
     fi
-    docker_exec stop "$id"
+    _driver container_stop "$id"
   done < <(_find_docker_managed "${find_args[@]}")
 }
 
@@ -1006,7 +1104,7 @@ opencode:delete() {
     else
       echo "Force-removing managed container $id"
     fi
-    docker_exec rm -f "$id"
+    _driver container_rm -f "$id"
   done < <(_find_docker_managed "${find_args[@]}")
 
   if [ "$all" -eq 1 ]; then
@@ -1020,9 +1118,9 @@ opencode:delete() {
     fi
 
     local -a images
-    mapfile -t images < <(docker_exec image ls -q "${filter_images[@]}")
+    mapfile -t images < <(_driver image_ls -q "${filter_images[@]}")
     if ((${#images[@]})); then
-      docker_exec image rm "${images[@]}"
+      _driver image_rm "${images[@]}"
     fi
 
     # remove the networks
@@ -1035,10 +1133,10 @@ opencode:delete() {
       filters_network+=(--filter "label=$LABEL_NETWORK_WORKSPACE=$ws_scope")
     fi
     local -a networks
-    mapfile -t networks < <(docker_exec network ls -q "${filters_network[@]}")
+    mapfile -t networks < <(_driver network_ls -q "${filters_network[@]}")
 
     if ((${#networks[@]})); then
-      docker_exec network rm "${networks[@]}"
+      _driver network_rm "${networks[@]}"
     fi
   fi
 }
@@ -1083,7 +1181,7 @@ opencode:ls() {
   while read -r id; do
     [[ -z "$id" ]] && continue
     rec="$(
-      docker_exec inspect \
+      _driver container_inspect \
         --format '{{.ID}}{{"\t"}}{{.State.Status}}{{"\t"}}{{index .Config.Labels "'"$WORKSPACE_LABEL"'"}}{{"\t"}}{{index .Config.Labels "'"$LABEL_CONTAINER_PROJECT_NAME"'"}}{{"\t"}}{{index .Config.Labels "'"$LABEL_ONE_OFF"'"}}{{"\t"}}{{index .Config.Labels "'"$TUI_LABEL"'"}}{{"\t"}}.' \
         "$id" 2>/dev/null
     )"
@@ -1453,18 +1551,18 @@ opencode:help() {
   echo "Run '$0 <command> --help' for details on a specific command."
   echo "Run '$0 <command> -h'     for details on a specific command."
 
-  if docker_exec image inspect "$IMAGE_URL" >/dev/null 2>&1; then
+  if _driver image_inspect "$IMAGE_URL" >/dev/null 2>&1; then
     echo
     local opencode_version
     local devcontainer_version
 
     opencode_version="$(
-      docker_exec image inspect "$IMAGE_URL" \
+      _driver image_inspect "$IMAGE_URL" \
         --format '{{ index .Config.Labels "dev.snowdon.image.opencode.version" }}'
     )"
 
     devcontainer_version="$(
-      docker_exec image inspect "$IMAGE_URL" \
+      _driver image_inspect "$IMAGE_URL" \
         --format '{{ index .Config.Labels "dev.snowdon.image.opencode.devcontainer" }}'
     )"
 
@@ -1565,7 +1663,7 @@ main() {
   fi
 
   # Just exit if there is no docker
-  if ! docker_exec info >/dev/null 2>&1; then
+  if ! _driver info >/dev/null 2>&1; then
     echo "Docker daemon is not running" >&2
     echo "Try something like: sudo systemctl start docker"
     exit 1

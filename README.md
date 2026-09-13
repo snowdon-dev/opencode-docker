@@ -326,9 +326,7 @@ Details:
 The launcher supports three network modes controlled by `OPENCODE_NETWORK`:
 
 1. **Unset (default)** — no external network is attached; the container uses
-   Docker's default bridge network. Services on different workspaces can see
-   each other unless you explicitly isolate them.
-
+   Docker's default bridge network.
 2. **`@default` (recommended)** — the launcher automatically creates a
    workspace-scoped bridge network named `sd-<project>-default` and attaches
    it to both the `opencode` and `tui` services. The subnet is allocated from

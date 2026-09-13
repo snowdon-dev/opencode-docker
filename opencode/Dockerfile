@@ -197,6 +197,24 @@ COPY --chown=${USERNAME}:${USERNAME} opencode/agent.md /home/${USERNAME}/.config
 USER root
 COPY --from=opencode /usr/local/bin/opencode /usr/local/bin/opencode
 RUN chmod +x /usr/local/bin/opencode
+
+# opencode's `!` command runs a login shell (bash -l), and Alpine's /etc/profile
+# resets PATH to the image baseline, dropping the toolchain dirs that the agent's
+# bash tool inherits from the serve process env. Re-add them for login shells via
+# /etc/profile.d, which /etc/profile sources after resetting PATH.
+RUN mkdir -p /etc/profile.d && cat > /etc/profile.d/50-opencode-toolchain.sh <<'EOF'
+if [ -n "${HOME}" ]; then
+  for dir in "${HOME}/.cargo/bin" "${HOME}/go/bin"; do
+    [ -d "${dir}" ] || continue
+    case ":${PATH}:" in
+      *:${dir}:*) ;;
+      *) export PATH="${dir}:${PATH}" ;;
+    esac
+  done
+  unset dir
+fi
+EOF
+
 USER $USERNAME
 RUN opencode --version
 
