@@ -116,7 +116,7 @@ jobs:
           fi
 
       - name: Install svu
-        if: steps.release.outputs.updated == 'false'
+        if: steps.release.outputs.updated != 'false'
         run: |
           go install github.com/caarlos0/svu@latest
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
