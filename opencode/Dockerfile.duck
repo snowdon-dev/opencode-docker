@@ -1,0 +1,44 @@
+ARG OPENCODE_BASE_URL=devsnowdon/opencode-docker
+FROM ${OPENCODE_BASE_URL}:empty
+
+LABEL dev.snowdon.image.opencode.variant="duck"
+
+ARG USERNAME=other
+
+# ------------------------------------------------------------
+# Packages setup
+# ------------------------------------------------------------
+# Node and Python runtimes on top of the empty base image.
+USER root
+
+RUN apk add --no-cache \
+    python3>=3.14 \
+    py3-pip>=26.1 \
+    nodejs>=24.18 \
+    npm>=11.12
+
+# Smoke tests for language packages
+RUN python3 --version \
+    && pip3 --version \
+    && node --version \
+    && npm --version
+
+# Alpine's /etc/profile resets PATH to the image baseline, dropping user-local
+# binary dirs from a login shell. pip --user / pipx install into ${HOME}/.local/bin
+# and npm --prefix ~/.npm-global into ${HOME}/.npm-global/bin; re-add them for
+# login shells. A distinct profile.d name ensures the full layer's toolchain
+# script (50-...) appends to this one instead of overwriting it.
+RUN mkdir -p /etc/profile.d && cat > /etc/profile.d/40-opencode-user-bin.sh <<'EOF'
+if [ -n "${HOME}" ]; then
+  for dir in "${HOME}/.local/bin" "${HOME}/.npm-global/bin"; do
+    [ -d "${dir}" ] || continue
+    case ":${PATH}:" in
+      *:${dir}:*) ;;
+      *) export PATH="${dir}:${PATH}" ;;
+    esac
+  done
+  unset dir
+fi
+EOF
+
+USER $USERNAME

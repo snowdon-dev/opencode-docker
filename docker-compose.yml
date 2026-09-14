@@ -7,7 +7,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        OPENCODE_IMAGE_URL: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker:latest}
+        OPENCODE_IMAGE_URL: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker:full}
         PROJECT_WORKSPACE: ${WORKSPACE:-${SD_OPENCODE}}
     # restart: unless-stopped
     entrypoint: ["/bin/sh", "-c"]
@@ -28,12 +28,13 @@ services:
       - ${OPENCODE_CONFIG_DIR:-${HOME}/.config/opencode}:/home/other/.config
       - ./opencode/agent.md:/home/other/.config/opencode/AGENTS.md:ro
     ports:
-      - "4096:4096"
+      # Publish on a random host port; query the assigned port with
+      # `opencode:compose port opencode 4096` when attaching to the backend.
+      - "0:4096"
 
   # only run as one off
-  # TODO: smaller image
   tui:
-    image: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker}
+    image: ${OPENCODE_IMAGE_URL_TUI:-devsnowdon/opencode-docker:empty}
     stdin_open: true
     tty: true
     labels:

@@ -1,0 +1,90 @@
+ARG OPENCODE_VERSION=latest
+FROM ghcr.io/anomalyco/opencode:${OPENCODE_VERSION} AS opencode
+FROM alpine:3.24
+ARG OPENCODE_VERSION=latest
+ARG DEVCONTAINER_VERSION
+LABEL dev.snowdon.image.opencode.version="${OPENCODE_VERSION}"
+LABEL dev.snowdon.image.opencode.devcontainer="${DEVCONTAINER_VERSION}"
+LABEL dev.snowdon.image.opencode.variant="empty"
+LABEL dev.snowdon.opencode.managed=true
+
+## TODO: handle any files left in /root from the opencode base
+
+ENV TERM=xterm-256color
+ENV COLORTERM=truecolor
+ARG USERNAME=other
+ARG USER_UID=1000
+ARG USER_GID=1000
+
+# ------------------------------------------------------------
+# User setup
+# ------------------------------------------------------------
+# Define build arguments for your host user
+
+# Create the group and user inside the container
+RUN addgroup -g $USER_GID $USERNAME \
+    && adduser -D -u $USER_UID -G $USERNAME $USERNAME \
+    && mkdir -p \
+        /home/$USERNAME/.local/state \
+        /home/$USERNAME/.local/share \
+        /home/$USERNAME/.config \
+    && chown -R $USER_UID:$USER_GID /home/$USERNAME
+
+# ------------------------------------------------------------
+# Packages setup
+# ------------------------------------------------------------
+# Minimal CLI toolset common to every variant. Language runtimes live in the
+# duck and full layers.
+RUN apk add --no-cache \
+    git>=2.54 \
+    curl>=8.22 \
+    make>=4.4 \
+    libpcap-dev>=1.10.6 \
+    bash>=5.3 \
+    ripgrep>=15.1 \
+    libgcc>=15.2 \
+    libstdc++>=15.2
+
+# Smoke tests for system packages
+RUN git --version \
+    && curl --version \
+    && make --version \
+    && rg --version \
+    && bash --version
+
+# ------------------------------------------------------------
+# Start user config
+# ------------------------------------------------------------
+# Switch to the non-root user
+USER $USERNAME
+
+
+# ------------------------------------------------------------
+# End
+# ------------------------------------------------------------
+
+ENV HOME="/home/${USERNAME}"
+ENV XDG_STATE_HOME="/home/${USERNAME}/.local/state"
+ENV XDG_DATA_HOME="/home/${USERNAME}/.local/share"
+ENV XDG_CACHE_HOME="/home/${USERNAME}/.cache"
+ENV XDG_CONFIG_HOME="/home/${USERNAME}/.config"
+
+# Workspace used by opencode
+WORKDIR /workspace
+ENV HOME=/home/$USERNAME
+
+# opencode
+ARG BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
+ENV BUN_RUNTIME_TRANSPILER_CACHE_PATH=${BUN_RUNTIME_TRANSPILER_CACHE_PATH}
+
+RUN mkdir -p /home/${USERNAME}/.config/opencode
+COPY --chown=${USERNAME}:${USERNAME} opencode/agent.md /home/${USERNAME}/.config/opencode/AGENTS.md
+
+USER root
+COPY --from=opencode /usr/local/bin/opencode /usr/local/bin/opencode
+RUN chmod +x /usr/local/bin/opencode
+
+USER $USERNAME
+RUN opencode --version
+
+ENTRYPOINT ["opencode"]

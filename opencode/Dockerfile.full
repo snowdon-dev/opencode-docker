@@ -1,0 +1,145 @@
+ARG OPENCODE_BASE_URL=devsnowdon/opencode-docker
+FROM ${OPENCODE_BASE_URL}:duck
+
+LABEL dev.snowdon.image.opencode.variant="full"
+
+# Build argument — disabled by default
+ARG INSTALL_RUST=false
+
+ARG USERNAME=other
+ARG USER_UID=1000
+ARG USER_GID=1000
+
+# ------------------------------------------------------------
+# Go environment
+# ------------------------------------------------------------
+USER root
+
+RUN apk add --no-cache \
+    'go>=1.26'
+
+# Smoke test for the Go toolchain
+RUN go version
+
+USER $USERNAME
+
+ENV GOPATH=/home/$USERNAME/go
+ENV PATH=$PATH:$GOPATH/bin
+ENV GOCACHE=/home/$USERNAME/.cache/go-build
+ENV GOMODCACHE=/home/$USERNAME/go/pkg/mod
+
+RUN mkdir -p $GOPATH/src $GOPATH/bin $GOMODCACHE $GOCACHE
+
+RUN go install golang.org/x/tools/gopls@v0.21.1 \
+    && go install github.com/go-delve/delve/cmd/dlv@v1.27.1 \
+    && go install github.com/swaggo/swag/cmd/swag@v1.16.4 \
+    && curl -sSfL https://golangci-lint.run/install.sh \
+        | sh -s -- -b "$GOPATH/bin" v2.11.4 \
+    && go clean -cache -modcache
+
+# Smoke tests for Go tools
+RUN gopls version \
+    && dlv version \
+    && swag --version \
+    && golangci-lint version
+
+# opencode's `!` command runs a login shell (bash -l), and Alpine's /etc/profile
+# resets PATH to the image baseline, dropping the toolchain dirs that the agent's
+# bash tool inherits from the serve process env. Re-add them for login shells via
+# /etc/profile.d, which /etc/profile sources after resetting PATH. Only the full
+# variant ships toolchain bins under $HOME, so the fix lives here.
+USER root
+RUN mkdir -p /etc/profile.d && cat > /etc/profile.d/50-opencode-toolchain.sh <<'EOF'
+if [ -n "${HOME}" ]; then
+  for dir in "${HOME}/.cargo/bin" "${HOME}/go/bin"; do
+    [ -d "${dir}" ] || continue
+    case ":${PATH}:" in
+      *:${dir}:*) ;;
+      *) export PATH="${dir}:${PATH}" ;;
+    esac
+  done
+  unset dir
+fi
+EOF
+
+# ------------------------------------------------------------
+# Optional Rust environment
+# ------------------------------------------------------------
+
+# TODO: install the bins in a from stage, and copy into container
+
+# C/C++ build toolchain required by the Rust toolchain, installed only when
+# Rust is enabled.
+USER root
+RUN if [ "$INSTALL_RUST" = "true" ]; then \
+        apk add --no-cache \
+            build-base>=0.5 \
+            pkgconf>=2.5 \
+            openssl-dev>=3.5 \
+            openssl-libs-static>=3.5 \
+            clang>=22.1 \
+            lld>=22.1 \
+            mold>=2.39 \
+            cmake>=4.2 \
+            unzip>=6.0 \
+            wayland-dev>=1.25 \
+            alsa-lib-dev>=1.2 \
+            eudev-dev>=3.2; \
+    fi
+
+# Rust lives in the user's home directory
+ENV PATH="/home/${USERNAME}/.cargo/bin:${PATH}"
+
+# sccache cache directory
+ENV SCCACHE_DIR="/home/${USERNAME}/.cache/sccache"
+
+# Install Rust only when requested
+# rustup-init is downloaded at a pinned version from the static.rust-lang.org
+# archive instead of piping sh.rustup.rs, so the install is reproducible.
+ARG TARGETARCH
+USER $USERNAME
+RUN if [ "$INSTALL_RUST" = "true" ]; then \
+        case "${TARGETARCH:-$(uname -m)}" in \
+            amd64|x86_64) RUSTUP_TRIPLE="x86_64-unknown-linux-musl" ;; \
+            arm64|aarch64) RUSTUP_TRIPLE="aarch64-unknown-linux-musl" ;; \
+            *) echo "Unsupported architecture: ${TARGETARCH:-$(uname -m)}" >&2; exit 1 ;; \
+        esac; \
+        curl -fsSL \
+            "https://static.rust-lang.org/rustup/archive/1.29.0/${RUSTUP_TRIPLE}/rustup-init" \
+            -o /tmp/rustup-init \
+        && chmod +x /tmp/rustup-init \
+        && /tmp/rustup-init \
+            -y \
+            --default-toolchain 1.98.0 \
+            --no-update-default-toolchain \
+            --no-modify-path \
+        && rm -f /tmp/rustup-init; \
+    fi
+
+# Use mold linker for faster builds
+ENV RUSTFLAGS="-C link-arg=-fuse-ld=mold"
+
+# Install Rust components and tools only when requested
+#
+# IMPORTANT:
+# Do not set RUSTC_WRAPPER until sccache has been installed.
+RUN if [ "$INSTALL_RUST" = "true" ]; then \
+        rustup component add rustfmt clippy && \
+        env -u RUSTC_WRAPPER cargo install sccache --version 0.17.0 \
+        && rm -rf \
+            /home/$USERNAME/.cargo/registry/cache \
+            /home/$USERNAME/.cargo/registry/src \
+            /home/$USERNAME/.cargo/git/checkouts \
+            /home/$USERNAME/.cargo/git/db; \
+    fi
+
+# Smoke tests for Rust tools (only when installed)
+RUN if [ "$INSTALL_RUST" = "true" ]; then \
+        rustup --version \
+        && rustc --version \
+        && cargo --version \
+        && sccache --version; \
+    fi
+
+# Configure sccache AFTER it has been installed
+ENV RUSTC_WRAPPER="/home/${USERNAME}/.cargo/bin/sccache"

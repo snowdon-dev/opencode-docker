@@ -18,13 +18,46 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Build with Kaniko
+      # The base image is layered: empty (base) <- duck (node+python) <- full
+      # (go/c/rust). Each step pulls the parent it FROMs from the registry,
+      # so the build runs in empty -> duck -> full order.
+      - name: Build and push empty
         uses: docker://registry.lan:5000/kaniko-project/executor:debug
         with:
           args: >-
             --context=${{ github.workspace }}
-            --dockerfile=${{ github.workspace }}/opencode/Dockerfile
-            --destination=registry.lan:5000/snowdon-dev/opencode
+            --dockerfile=${{ github.workspace }}/opencode/Dockerfile.empty
+            --destination=registry.lan:5000/snowdon-dev/opencode:empty
+            --insecure
+            --insecure-pull
+            --insecure-registry=registry.lan:5000
+            --skip-tls-verify
+            --cache=true
+
+      - name: Build and push duck
+        uses: docker://registry.lan:5000/kaniko-project/executor:debug
+        with:
+          args: >-
+            --context=${{ github.workspace }}
+            --dockerfile=${{ github.workspace }}/opencode/Dockerfile.duck
+            --destination=registry.lan:5000/snowdon-dev/opencode:duck
+            --build-arg=OPENCODE_BASE_URL=registry.lan:5000/snowdon-dev/opencode
+            --insecure
+            --insecure-pull
+            --insecure-registry=registry.lan:5000
+            --skip-tls-verify
+            --cache=true
+
+      - name: Build and push full
+        uses: docker://registry.lan:5000/kaniko-project/executor:debug
+        with:
+          args: >-
+            --context=${{ github.workspace }}
+            --dockerfile=${{ github.workspace }}/opencode/Dockerfile.full
+            --destination=registry.lan:5000/snowdon-dev/opencode:full
+            --destination=registry.lan:5000/snowdon-dev/opencode:latest
+            --build-arg=OPENCODE_BASE_URL=registry.lan:5000/snowdon-dev/opencode
+            --build-arg=INSTALL_RUST=true
             --insecure
             --insecure-pull
             --insecure-registry=registry.lan:5000

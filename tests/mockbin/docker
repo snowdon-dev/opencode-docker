@@ -78,6 +78,16 @@ if [[ "$1" == "compose" ]]; then
         echo "mocked: run ${*}"
       fi
       ;;
+    port)
+      # Simulate `docker compose port opencode 4096`, which prints the host
+      # mapping for the service's private port. The port is random when the
+      # compose file publishes "0:4096"; OPENCODE_TEST_HOST_PORT overrides it.
+      # Fails (like a missing mapping / stopped container) on demand.
+      if [[ "${OPENCODE_TEST_NO_CONTAINER:-}" == "1" || "${OPENCODE_TEST_PORT_FAIL:-}" == "1" ]]; then
+        exit 1
+      fi
+      printf '0.0.0.0:%s\n' "${OPENCODE_TEST_HOST_PORT:-32768}"
+      ;;
     *)
       echo "mocked: compose $sub $*"
       ;;
@@ -89,9 +99,9 @@ elif [[ "$1" == "ps" ]]; then
     exit 0
   fi
   # Normal case: report a single managed container. With the -q flag only the
-  # container id is printed (used by conflict detection), otherwise the old
-  # "<id>\t<workspace>" form. With OPENCODE_TEST_CONFLICT=1, report a
-  # *different* workspace so the launcher aborts with a conflict message.
+  # container id is printed, otherwise the "<id>\t<workspace>" form. When
+  # OPENCODE_TEST_CONFLICT=1 the inspect mock returns a *different* workspace
+  # so the launcher can exercise its coexistence warning.
   quiet=0
   for a in "$@"; do [[ "$a" == "-q" ]] && quiet=1; done
   if [[ "$quiet" == "1" ]]; then
@@ -103,9 +113,9 @@ elif [[ "$1" == "ps" ]]; then
   fi
 elif [[ "$1" == "inspect" ]]; then
   shift
-  # Return the workspace value from the container's Config.Labels. The label is
-  # only rendered (non-empty) when not in conflict mode, so conflict detection
-  # can see the differing workspace.
+  # Return the workspace value from the container's Config.Labels. When
+  # OPENCODE_TEST_CONFLICT=1 the label resolves to a *different* workspace so
+  # the launcher can see a coexisting container and warn about it.
   f=""
   while [[ $# -gt 0 ]]; do
     case "$1" in

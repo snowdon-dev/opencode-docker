@@ -21,7 +21,7 @@ DOCKER_ARGS="${DOCKER_ARGS:-}"
 # bare prefix whose mask is implied at 8 bits per octet ("172.20" -> /16).
 NETWORK_RANGE="${OPENCODE_NET_RANGE:-172.20.0.0/16}"
 # Mask of each network created inside the range (a /16 range slices into 256 /24s).
-NET_SUBNET_MASK="${OPENCODE_NET_SUBNET:-24}"
+NET_SUBNET_MASK="${OPENCODE_NET_SUBNET:-29}"
 
 # Parsed NETWORK_RANGE: 32-bit network address and prefix length, set by _net_parse.
 net_base=""
@@ -29,6 +29,11 @@ net_mask=""
 
 PROJECT_NAME=""
 OPENCODE_ARGS=""
+
+# Resolved backend origin (http://host:port) used for the health check and the
+# host-side TUI attach. Set once by opencode() after the container is up; the
+# host port is random when docker-compose.yml publishes "0:4096".
+BACKEND_ORIGIN=""
 
 tmp_compose_dir=""
 tmp_compose_file=""
@@ -42,6 +47,10 @@ _cleanup_scaffold_output=""
 _cleanup_changes_name=""
 _cleanup_changes_pid=""
 _cleanup_changes_output=""
+
+_cleanup_bg_name=""
+_cleanup_bg_pid=""
+_cleanup_bg_output=""
 
 declare -ga _cleanup_stack=()
 
@@ -127,6 +136,7 @@ docker_network_subnets() {
 docker_network_name() { docker_exec network inspect "$1" --format '{{.Name}}'; }
 docker_network_create() {
   local name="$1" subnet="$2" workspace="$3"
+  echo "name: $1, subnet: $subnet, workspace: $3"
   docker_exec network create \
     --driver bridge \
     --subnet="$subnet" \
@@ -192,10 +202,10 @@ _net_parse() {
   # TODO: Cap can be increased to allow smaller OPENCODE_NET_SUBNET="28"
   if [[ "$NETWORK_RANGE" != */* ]]; then
     mask=$((${#octs[@]} * 8))
-    ((mask > 24)) && mask=24
+    ((mask > 29)) && mask=29
   fi
-  if [[ ! "$mask" =~ ^[0-9]{1,2}$ ]] || ((mask < 1 || mask > 24)); then
-    echo "error: OPENCODE_NET_RANGE mask must be between /1 and /24" >&2
+  if [[ ! "$mask" =~ ^[0-9]{1,2}$ ]] || ((mask < 1 || mask > 29)); then
+    echo "error: OPENCODE_NET_RANGE mask must be between /1 and /29" >&2
     return 1
   fi
 
@@ -226,8 +236,8 @@ find_free_network() {
   fi
 
   if [[ ! "$NET_SUBNET_MASK" =~ ^[0-9]{1,2}$ ]] ||
-    ((NET_SUBNET_MASK < 1 || NET_SUBNET_MASK > 24)); then
-    echo "error: OPENCODE_NET_SUBNET must be between /1 and /24" >&2
+    ((NET_SUBNET_MASK < 1 || NET_SUBNET_MASK > 29)); then
+    echo "error: OPENCODE_NET_SUBNET must be between /1 and /29" >&2
     return 1
   fi
 
@@ -556,6 +566,8 @@ _opencode_dispatch() {
 
   local running
   running="$(_driver compose "${OPENCODE_ARGS[@]}" ps -q opencode)"
+  # TODO: If there is a process opencode attach, then its running, but it may
+  # be best to run a one off
 
   if [[ -n "$running" ]]; then
     # Use the already-running container. Without -T (interactive) output streams
@@ -608,8 +620,22 @@ _opencode_ctx() {
   )
 }
 
+# Resolve the host-side port that docker published for the opencode service's
+# private port 4096. With a dynamic binding ("0:4096") the host port is chosen
+# at container creation, so it must be queried back with
+# `docker compose port opencode 4096` rather than assumed. The output is
+# "0.0.0.0:PORT"; only the numeric PORT is emitted. Returns non-zero when the
+# container is not running or the mapping is absent.
+_backend_host_port() {
+  local published
+  published="$(_driver compose "${OPENCODE_ARGS[@]}" port opencode 4096 2>/dev/null)" || return 1
+  published="${published##*:}"
+  [[ "$published" =~ ^[0-9]+$ ]] && printf '%s\n' "$published"
+}
+
 _backend_healthy() {
-  local BACKEND_HEALTH_URL="${OPENCODE_BACKEND_ORIGIN:-http://$LOOPBACK:4096}"
+  local BACKEND_HEALTH_URL="${BACKEND_ORIGIN:-${OPENCODE_BACKEND_ORIGIN:-}}"
+  [[ -n "$BACKEND_HEALTH_URL" ]] || return 1
   curl -fsS \
     --connect-timeout 0.2 \
     --max-time 0.5 \
@@ -656,10 +682,13 @@ _find_workspace() {
 
 _run_opencode_executable() {
   if command which opencode >/dev/null 2>&1; then
-    local BACKEND_ORIGIN="${OPENCODE_BACKEND_ORIGIN:-http://$LOOPBACK:4096}"
     echo "Using opencode tui $(command which opencode)"
+    # The backend is published on a random host port; BACKEND_ORIGIN is the
+    # resolved `docker compose port opencode 4096` mapping (or a
+    # OPENCODE_BACKEND_ORIGIN override).
     command opencode attach "$BACKEND_ORIGIN" "$@"
   else
+    # Inside the compose network the service is reachable on its private port.
     local BACKEND_ORIGIN="${OPENCODE_BACKEND_ORIGIN:-http://opencode:4096}"
     # this need to be able to pass info to healthy, without a port
     _driver compose "${OPENCODE_ARGS[@]}" run \
@@ -722,31 +751,58 @@ _cleanup_changes() {
   fi
 }
 
+# Tear down an in-flight bg run: kill the compose client, force-remove the
+# one-off container, and delete the temp output file. Same as the scaffold
+# teardown (see _cleanup_scaffold) but for the 'bg' command's container.
+_cleanup_bg() {
+  if [[ -n "$_cleanup_bg_pid" ]]; then
+    kill -KILL "$_cleanup_bg_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$_cleanup_bg_name" ]]; then
+    if ! _driver container_rm -f -v "$_cleanup_bg_name" >/dev/null 2>&1; then
+      # Name may be stale or the engine busy: force-kill, retry, then report.
+      _driver container_kill "$_cleanup_bg_name" >/dev/null 2>&1 || true
+      if ! _driver container_rm -f "$_cleanup_bg_name" >/dev/null 2>&1; then
+        echo "WARNING: could not remove bg container $_cleanup_bg_name" >&2
+        echo "  run: $DRIVER_BIN rm -f $_cleanup_bg_name" >&2
+        _driver container_ls -a --filter "name=oc-bg-" \
+          --format '  {{.ID}}  {{.Names}}  {{.Status}}' >&2 || true
+      fi
+    fi
+  fi
+  if [[ -n "$_cleanup_bg_output" ]]; then
+    rm -f -- "$_cleanup_bg_output"
+  fi
+}
+
 # Main function to start and run opencode in a Docker container
 # This function creates and executes the opencode container with proper
 # workspace configuration and environment isolation.
 opencode() {
-  # Container conflict detection.
-  # The service binds a fixed host port that cannot be shared by multiple
-  # running containers, so a new container cannot be created while another
-  # managed opencode container is already running. Detect those instances by
-  # label, and if one belongs to a different workspace, abort and tell the
-  # user how to remove it before proceeding.
-  local conflict_id conflict_ws
-  while read -r conflict_id; do
-    [[ -z "$conflict_id" ]] && continue
+  # Multiple workspaces run concurrently: each backend is published on its own
+  # randomly assigned host port. When another managed opencode container is
+  # already running for a different workspace, warn (do not abort) so the user
+  # knows several backends are active.
+  local running_id running_ws
+  local other_running=0
+  while read -r running_id; do
+    [[ -z "$running_id" ]] && continue
 
     # Use docker inspect, not docker ps --format: .Config.Labels is always a
     # map, whereas .Labels from 'ps --format' can surface as a slice (indexing
     # a slice by string then fails), depending on the docker/compose build.
-    conflict_ws="$(_find_workspace "$conflict_id")"
-    if [[ -n "$conflict_ws" && "$conflict_ws" != "$WORKSPACE" ]]; then
-      echo "Container already running for workspace $conflict_ws." >&2
-      echo "Run 'opencode:down $conflict_ws' first, or use 'opencode:new' to" >&2
-      echo "automatically remove the existing container." >&2
-      exit 1
+    running_ws="$(_find_workspace "$running_id")"
+    if [[ -n "$running_ws" && "$running_ws" != "$WORKSPACE" ]]; then
+      other_running=1
+      break
     fi
   done < <(_find_docker_managed)
+
+  if [[ "$other_running" -eq 1 ]]; then
+    echo "WARNING: pre-existing opencode containers are running for other workspaces" >&2
+    echo "  They bind separate random host ports, so sessions can coexist." >&2
+    echo "  Run 'opencode:stop' to stop them all." >&2
+  fi
 
   # start the containers
   _opencode_ensure_up || {
@@ -756,6 +812,22 @@ opencode() {
 
   # ensure cleanup afterwards
   cleanup_add _cleanup_opencode_backend
+
+  # The backend is served on the container's private port 4096; the host port
+  # is random ("0:4096" in docker-compose.yml), so resolve it back from docker
+  # once. OPENCODE_BACKEND_ORIGIN still overrides the whole origin.
+  if [[ -n "${OPENCODE_BACKEND_ORIGIN:-}" ]]; then
+    BACKEND_ORIGIN="$OPENCODE_BACKEND_ORIGIN"
+  else
+    local backend_port
+    backend_port="$(_backend_host_port)" || {
+      echo "Failed to resolve the published backend port" >&2
+      echo "Run 'opencode:compose port opencode 4096' to inspect the mapping." >&2
+      exit 1
+    }
+    BACKEND_ORIGIN="http://$LOOPBACK:$backend_port"
+    echo "Backend: $BACKEND_ORIGIN"
+  fi
 
   # TODO: don't expose the port on the host unless required, then one backend
   # cannot talk to another projects backend, this will be helpfull if multiple
@@ -1018,9 +1090,82 @@ Your task is as follows:
   return "$status"
 }
 
-# Remove existing opencode containers before starting.
-# This resolves port-binding conflicts when multiple managed containers
-# (labelled dev.snowdon.opencode.managed=true) cannot share the same port.
+# Run a one-off, non-interactive opencode task against an existing workspace.
+# Like scaffold, but without the empty-directory requirement: the workspace may
+# already contain code (that is usually the point). The task-information context
+# is worded for an existing project, and the result streams to the terminal via
+# the same background one-off container + Ctrl+C-safe teardown as scaffold.
+opencode:bg() {
+  if (($# != 1)) && [[ -t 0 ]]; then
+    echo "Error: no task provided" >&2
+    _opencode_help_cmd "bg"
+    exit 1
+  fi
+
+  echo "Running background task on opencode project: $PROJECT_NAME ($WORKSPACE)"
+
+  # Configure CPU resources for the container
+  local cpus="${OPENCODE_CPUSET:-2-3}"
+
+  # Build context information for the opencode runner. Reduces execution
+  # overhead and could eliminate a dependency on shell environment within the
+  # container.
+  local tmp_context
+  tmp_context="<task-information>
+You are running a task in the existing project.
+You have access to the CPUSET: $cpus
+/workspace is the project: $PROJECT_NAME
+Working directory: /workspace
+Workspace contents of /workspace:
+\`\`\`
+$(ls -la "$WORKSPACE")
+\`\`\`
+$(_print_readme)
+$(_print_git_context)
+</task-information>
+
+Your task is as follows:
+
+"
+
+  # The one-off container runs as a background job of the host launcher (the
+  # container itself still lives in the docker daemon). Its output is captured
+  # to a temp file so it can be streamed to the terminal, and on Ctrl+C the
+  # existing INT trap -> EXIT -> cleanup_add stack kills the compose client and
+  # the container instead of docker's (absent, with -T) signal proxy.
+  local cname="oc-bg-$$"
+  local outfile status
+  outfile="$(mktemp "${TMPDIR:-/tmp}/opencode-bg.XXXXXX")" || return 1
+
+  _cleanup_bg_name="$cname"
+  _cleanup_bg_output="$outfile"
+  _cleanup_bg_pid=""
+  cleanup_add _cleanup_bg
+
+  # Execute opencode with context information
+  {
+    printf '%s' "$tmp_context"
+    if [ "$#" -gt 0 ]; then
+      printf '%s' "$1"
+    else
+      cat
+    fi
+  } | _driver compose "${OPENCODE_ARGS[@]}" \
+    run --rm -T --name "$cname" opencode 'exec opencode run "$@"' \
+    opencode --auto "$@" >"$outfile" 2>&1 &
+  _cleanup_bg_pid=$!
+
+  # Stream the captured output to the terminal
+  tail -f "$outfile" &
+  local _tail_pid=$!
+  wait "$_cleanup_bg_pid"
+  status=$?
+  kill $_tail_pid
+
+  return "$status"
+}
+
+# Remove existing opencode containers before starting a fresh session.
 opencode:new() {
   opencode:stop
 
@@ -1374,8 +1519,8 @@ _opencode_help_cmd() {
     ;;
   new)
     echo "new [opencode args...]"
-    echo "  Remove all managed opencode containers (resolving any port conflicts) then"
-    echo "  start a fresh container and opencode session."
+    echo "  Stop existing opencode containers, then start a fresh container and"
+    echo "  opencode session."
     echo "  Args:"
     echo "    opencode args...   Additional arguments forwarded to the opencode CLI."
     ;;
@@ -1465,6 +1610,18 @@ _opencode_help_cmd() {
     echo "    task                A description of what opencode should do"
     echo "    opencode args...    Additional arguments forwarded to the opencode CLI."
     ;;
+  bg)
+    echo "bg [path] (task) [opencode args...]"
+    echo "  Run a one-off, non-interactive opencode task against an existing project"
+    echo "  (no empty-directory requirement, unlike scaffold). With a path that does"
+    echo "  not start with /, it defaults to SD_REPO_HOME (default: /home/<user>/repos)."
+    echo "  Output streams to the terminal while the task runs."
+    echo "  If not given a task argument, it will read from the stdin"
+    echo "  Args:"
+    echo "    path                Project name or './relative/path'. Optional."
+    echo "    task                A description of what opencode should do"
+    echo "    opencode args...    Additional arguments forwarded to the opencode CLI."
+    ;;
   security)
     echo "security"
     echo "  Analyse the repository for potential security risks such as executable"
@@ -1526,7 +1683,7 @@ opencode:help() {
   echo
   echo "Commands:"
   printf '  %-11s %s\n' "start" "Create the container and run an interactive opencode session"
-  printf '  %-11s %s\n' "new" "Remove conflicting containers and start a fresh session"
+  printf '  %-11s %s\n' "new" "Stop existing containers and start a fresh session"
   printf '  %-11s %s\n' "up" "Start the container in the background without running a process"
   printf '  %-11s %s\n' "setup" "Run setup commands against the persisted instance"
   printf '  %-11s %s\n' "down" "Remove the project's containers, networks, volumes, and TUI"
@@ -1537,6 +1694,7 @@ opencode:help() {
   printf '  %-11s %s\n' "run" "Run a one-off non-interactive task in the service"
   printf '  %-11s %s\n' "shell" "Open an interactive shell inside the running container"
   printf '  %-11s %s\n' "scaffold" "Create a new opencode project with a fresh git repo"
+  printf '  %-11s %s\n' "bg" "Run a one-off background opencode task on an existing project"
   printf '  %-11s %s\n' "security" "Analyse the repository for potential security risks (not implemented)"
   printf '  %-11s %s\n' "changes" "Analyse the branch changes and propose a plan"
   printf '  %-11s %s\n' "clone" "Clone a git repository into a managed location (not implemented)"
@@ -1578,7 +1736,7 @@ opencode:help() {
 
   echo "Git location:       $SD_OPENCODE"
 
-  if command -v git &>/dev/null; then
+  if command -v git >/dev/null; then
     local tags
     tags="$(git -C "$SD_OPENCODE" describe --tags --exact-match 2>/dev/null || echo unknown)"
     local commit
@@ -1753,6 +1911,46 @@ main() {
       ws_out="$(cd -- "$ws_out" && pwd)"
     fi
     ;;
+  bg)
+    # require a task argument when stdin is a terminal (nothing can be piped in)
+    if [ -t 0 ] && [[ $# -lt 1 ]]; then
+      echo "You did not provide a task to bg." >&2
+      exit 1
+    fi
+
+    if [[ -n ${1+x} ]]; then
+      # Resolve the project name to an absolute workspace path. Unlike scaffold,
+      # there is no empty-directory requirement: bg runs against an existing
+      # project (possibly the current directory) that may already contain code.
+      local name=$1
+      if [[ "$name" == ./ ]]; then
+        # "./" alone means the current directory itself
+        ws_out="$(pwd)"
+      elif [[ "$name" == ./* ]]; then
+        # relative to the current directory
+        ws_out="$(pwd)/${name#./}"
+      elif [[ "$name" == /* ]]; then
+        # absolute path
+        ws_out="$name"
+      else
+        # under the SD_REPO_HOME root
+        ws_out="${SD_REPO_HOME}/$name"
+      fi
+      shift
+
+      if [[ -e "$ws_out" || -L "$ws_out" ]]; then
+        if [[ ! -d "$ws_out" ]]; then
+          echo "Path already exists but is not a directory: $ws_out" >&2
+          exit 1
+        fi
+        echo "Using existing directory: $ws_out"
+      else
+        echo "Creating $ws_out"
+        mkdir -p -- "$ws_out" || exit 1
+      fi
+      ws_out="$(cd -- "$ws_out" && pwd)"
+    fi
+    ;;
   esac
 
   # when argument one is a path starting with / or ./ capture it as the ws_out,
@@ -1817,6 +2015,10 @@ main() {
   changes)
     # Analyze branch changes for the workspace
     _opencode_ctx opencode:changes "$ws_out" "$proj" "$@"
+    ;;
+  bg)
+    # Run a background, non-interactive opencode task against the workspace
+    _opencode_ctx opencode:bg "$ws_out" "$proj" "$@"
     ;;
   security)
     # TODO: Implement command to analyze repository security Should read code

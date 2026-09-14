@@ -76,6 +76,7 @@ run_launcher() {
     -e 's#-f [^ ]*docker-compose\.git\.yml#-f <tmp>/docker-compose.git.yml#g' \
     -e 's/oc-scaffold-[0-9]+/oc-scaffold-<pid>/g' \
     -e 's/oc-changes-[0-9]+/oc-changes-<pid>/g' \
+    -e 's/oc-bg-[0-9]+/oc-bg-<pid>/g' \
     "$OPENCODE_TEST_DOCKER_LOG")"
 }
 
@@ -268,40 +269,71 @@ t_cache_unknown() {
 }
 
 t_start() {
-  # start: conflict check -> ensure_up (up -d) -> backend health (mocked
-  # curl returns ok, so serve is skipped) -> attach via mocked opencode -> ps.
+  # start: warn on other running workspaces -> ensure_up (up -d) -> resolve the
+  # published backend port (compose port) -> backend health (mocked curl returns
+  # skipped) -> attach via mocked opencode at the resolved host port -> ps.
   run_launcher /dev/null start --model gpt
   assert_docker_contains "docker ps -q --filter label=dev.snowdon.opencode.managed=true"
   assert_docker_contains "$CBASE up -d opencode"
-  assert_docker_contains "opencode attach http://127.0.0.1:4096 --model gpt"
+  assert_docker_contains "$CBASE port opencode 4096"
+  assert_docker_contains "opencode attach http://127.0.0.1:32768 --model gpt"
   assert_docker_contains "$CBASE ps -q -a opencode"
   assert_launcher_output_contains "Backend ready. Attaching..."
 }
 
-t_start_conflict() {
-  # A managed container for a *different* workspace is already running. The
-  # fixed port binding cannot be shared, so `start` aborts before creating
-  # a new container, telling the user how to free the workspace.
-  OPENCODE_TEST_CONFLICT=1 run_launcher /dev/null start --model gpt
-  assert_launcher_output_contains "Container already running for workspace /workspace/other."
-  assert_launcher_output_contains "opencode:down /workspace/other"
-  # Must NOT have attempted to create the container (no compose up/exec/attach).
-  if grep -Fq "up -d" <<<"$DOCKER_LOG"; then
-    FAIL=$((FAIL+1)); FAILED_TESTS+=("$CURRENT:should_not_create")
-    echo "  FAIL: compose up was called despite conflict"
+t_start_custom_port() {
+  # OPENCODE_TEST_HOST_PORT customises the mocked port to prove the resolved
+  # host port is used (not a hardcoded one).
+  OPENCODE_TEST_HOST_PORT=49152 run_launcher /dev/null start --model gpt
+  assert_docker_contains "opencode attach http://127.0.0.1:49152 --model gpt"
+  assert_launcher_output_contains "Backend: http://127.0.0.1:49152"
+}
+
+t_start_port_fail() {
+  # If the backend port cannot be resolved (e.g. no port mapping), start must
+  # abort with a helpful message rather than attach to a bogus address.
+  local rc=0
+  OPENCODE_TEST_PORT_FAIL=1 run_launcher /dev/null start --model gpt
+  rc=$LAUNCH_RC
+  assert_launcher_output_contains "Failed to resolve the published backend port"
+  assert_launcher_output_contains "opencode:compose port opencode 4096"
+  if [[ "$rc" -eq 0 ]]; then
+    FAIL=$((FAIL+1)); FAILED_TESTS+=("$CURRENT:exit")
+    echo "  FAIL: start did not exit non-zero after port resolution failure"
   else
-    PASS=$((PASS+1)); echo "  ok: no container creation on conflict"
+    PASS=$((PASS+1)); echo "  ok: start exits non-zero after port resolution failure"
   fi
+  # Must NOT have attempted the health check or attach.
+  if grep -Fq "opencode attach" <<<"$DOCKER_LOG"; then
+    FAIL=$((FAIL+1)); FAILED_TESTS+=("$CURRENT:no_attach")
+    echo "  FAIL: attach ran despite port resolution failure"
+  else
+    PASS=$((PASS+1)); echo "  ok: no attach after port resolution failure"
+  fi
+}
+
+t_start_other_workspace() {
+  # A managed container for a *different* workspace is already running. Since
+  # each backend publishes on a random host port the sessions coexist: start
+  # proceeds fully but warns that pre-existing containers are active.
+  OPENCODE_TEST_CONFLICT=1 run_launcher /dev/null start --model gpt
+  assert_launcher_output_contains "WARNING: pre-existing opencode containers are running for other workspaces"
+  assert_launcher_output_contains "opencode:stop"
+  # Must NOT have aborted: the full start sequence still runs.
+  assert_docker_contains "$CBASE up -d opencode"
+  assert_docker_contains "$CBASE port opencode 4096"
+  assert_docker_contains "opencode attach http://127.0.0.1:32768 --model gpt"
 }
 
 t_new() {
   # new: opencode:stop (find + stop all managed containers) then opencode (full
-  # start sequence: conflict check, ensure_up, attach, verify).
+  # start sequence: ensure_up, attach, verify).
   run_launcher /dev/null new "do something"
   assert_docker_contains "docker ps -q --filter label=dev.snowdon.opencode.managed=true"
   assert_docker_contains "docker stop c1"
   assert_docker_contains "$CBASE up -d opencode"
-  assert_docker_contains "opencode attach http://127.0.0.1:4096 do something"
+  assert_docker_contains "$CBASE port opencode 4096"
+  assert_docker_contains "opencode attach http://127.0.0.1:32768 do something"
   assert_launcher_output_contains "Starting fresh opencode container"
 }
 
@@ -438,11 +470,35 @@ t_scaffold() {
   assert_launcher_output_contains "Running on opencode project: proj-scaffold"
 }
 
+t_bg() {
+  # bg runs against an existing (non-empty) workspace: unlike scaffold there is
+  # no empty-directory requirement, so the sandbox ws (which has a .git dir) is
+  # used directly via './'. First positional is the path (like scaffold), the
+  # second is the task.
+  run_launcher /dev/null bg ./ "test task"
+  # The one-off compose run uses the bg container name and --auto, then the
+  # cleanup removes the container by name.
+  assert_docker_contains "oc-bg-<pid> opencode exec"
+  assert_docker_contains "opencode --auto"
+  assert_docker_contains "docker rm -f -v oc-bg-<pid>"
+  assert_launcher_output_contains "Running background task on opencode project: ws"
+}
+
+t_bg_path() {
+  # A relative project name resolves under SD_REPO_HOME and is created (not
+  # empty-dir checked), mirroring scaffold's path handling.
+  mkdir -p "$SD/repos"
+  run_launcher /dev/null bg proj-bg "test task"
+  assert_docker_contains "oc-bg-<pid> opencode exec"
+  assert_docker_contains "docker rm -f -v oc-bg-<pid>"
+  assert_launcher_output_contains "Running background task on opencode project: proj-bg"
+}
+
 t_help() {
   run_launcher /dev/null help
   assert_launcher_output_contains "opencode launcher - manage the opencode container and sessions"
   assert_launcher_output_contains "Commands:"
-  for cmd in start new up setup stop delete ls exec down run shell scaffold changes compose help; do
+  for cmd in start new up setup stop delete ls exec down run shell bg scaffold changes compose help; do
     assert_launcher_output_contains "$cmd"
   done
 }

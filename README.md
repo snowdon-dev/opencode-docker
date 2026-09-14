@@ -39,6 +39,8 @@ opencode:compose exec -it opencode sh
 opencode:changes "identify issues in these changes"
 opencode:scaffold path "the task"
 opencode:scaffold /tmp/project < /tmp/sometask.md
+opencode:bg path "the task"
+opencode:bg ./ "refactor this module"
 
 opencode -c --auto
 opencode /home/other/somerepo
@@ -53,6 +55,7 @@ oc:sf ./ "Create a hello world go project."
 oc:sf ./newmodule "Create a golang package that exports a function that adds integers. No go.mod"
 
 OPENCODE_IMAGE_URL="my-custom-image:latest" opencode
+OPENCODE_IMAGE_URL="devsnowdon/opencode-docker:duck" opencode
 OPENCODE_NETWORK="custom-network" opencode
 OPENCODE_NETWORK="@default" opencode
 
@@ -83,12 +86,12 @@ opencode:setup sh -c 'cd front-end && npm install' && opencode
 - [x] Allow easy mounting of the config dir
 - [ ] Build image from a workspace path instead of the same /Dockerfile in the
   opencode root. Point at a folder for the workspace, and a context at the workspace
-- [ ] Layered containers - full(rust, go, c, node, python) - duck(node, python)
+- [x] Layered containers - full(rust, go, c, node, python) - duck(node, python)
   empty.
 - [ ] Layered containers - [development containers spec](https://containers.dev/implementors/spec/)
-- [ ] Layered containers - In the docker compose, use build. and add a docker
+- [x] Layered containers - In the docker compose, use build. and add a docker
   that uses FROM image-full
-- [ ] Fix: Allow multiple port bindings to enable multiple running agents on
+- [x] Fix: Allow multiple port bindings to enable multiple running agents on
   multiple projects
 - [ ] Project creation with scaffold extra context
 - [ ] /Dockerfile should only be added if a Dockerfile exists. Otherwise use
@@ -106,36 +109,36 @@ git clone https://github.com/snowdon-dev/opencode-docker.git ~/opencode
 repository there:
 
 This also means a `.env` placed in the repository root is picked up by both
-plain `docker compose` runs and the launcher. See [Environment
-variables](#environment-variables).
+plain `docker compose` runs. See [Environment
+variables](#environment-variables). The launcher also requires seperate
+variables, see [Launcher variables](#launcher-variables) sections. However,
+only one environment variable is actually required. The reset are avaliable for
+custom configuration or custom profiles.
 
 `docker-compose.yml` now has a `build:` section, so `docker compose up` builds
 the local image from the repository `Dockerfile` (which layers on top of the
 published [base image](https://hub.docker.com/r/devsnowdon/opencode-docker))
 unless `OPENCODE_IMAGE_URL` points at a prebuilt image. Run `opencode:update`
-(alias `oc:u`) or `docker compose pull && docker compose build` to refresh it
-after a new release.
+(alias `oc:u`).
 
-## Container Usage
-
-You should use the opencode launcher utility to launch the container, as it
-needs environment variables (like WORKSPACE) to init properly. See the
-[oh-my-zsh](#oh-my-zsh-plugin) plugin.
-
-```sh
-docker compose up -d opencode
-docker compose exec -w /workspace opencode opencode
-```
-
-When `opencode` (the `start` command) runs, the launcher starts an
-`opencode serve` backend inside the container on port `4096`, waits until it
-is healthy, and then attaches a TUI to it — using a host `opencode` binary if
-one is on the `PATH`, otherwise the one-off `tui` compose service. The old
-backend is killed when the TUI exits.
+When `opencode` (the `start` command) runs, the launcher starts an `opencode
+serve` backend inside the container, waits until it is healthy, and then
+attaches a TUI to it — using a host `opencode` binary if one is on the `PATH`,
+otherwise the one-off `tui` compose service. The old backend is killed when the
+TUI exits. Run, changes, setup, bg commands create a onoff container.
 
 ## oh-my-zsh plugin
 
-Instead of running the compose directly, install as an omz plugin for handy commands.
+You should use the `opencode` launcher utility to launch the container, as it
+sets up several required environment variables, such as `WORKSPACE`, during
+initialization.
+
+The `omz` plugin is very lightweight and is not required. You can—and are
+encouraged to—create your own profiles and environments using whichever shell
+you prefer.
+
+Instead of running the compose directly, install as an omz plugin for handy
+commands.
 
 `omz/opencode.zsh` provides shell aliases (`opencode`, `oc`, `oc:s`,
 `oc:u`, `oc:d`, `oc:del`, `oc:c`, ...) wrapping the launcher. It also defines
@@ -168,7 +171,8 @@ running `alias | grep -E ^oc` or `alias | grep opencode`. Then try running
 - If not otherwise specified the environment default will only use 2 cpus.
 - An environment `SD_REPO_HOME` variable sets the root location used when
   building non-absolute paths in the scaffold command.
-- The opencode binary from the shell path to run the TUI (`npm i -g opencode-ai`) if one exists.
+- The opencode binary from the shell path to run the TUI (`npm i -g
+  opencode-ai`) if one exists.
 - Docker is required [docker.io](https://www.docker.com/)
 
 ### Creating the directories
@@ -235,6 +239,8 @@ default pointing at the conventional location under your home directory
 
 | Variable                   | Default                          | Mounted at (container)              |
 |----------------------------|----------------------------------|-------------------------------------|
+| `OPENCODE_IMAGE_URL`       | `devsnowdon/opencode-docker:full` | – (build arg: base image for the `opencode` service) |
+| `OPENCODE_IMAGE_URL_TUI`   | `devsnowdon/opencode-docker:empty` | – (image for the `tui` service) |
 | `WORKSPACE`                | `.`                              | `/workspace`                        |
 | `OPENCODE_CPUSET`          | `2-3`                            | – (CPU pinning)                     |
 | `OPENCODE_NETWORK`         | –                                | – (external network, see `compose-net/docker-compose.network.yml`) |
@@ -250,7 +256,7 @@ default pointing at the conventional location under your home directory
 | `OPENCODE_SCCACHE_DIR`        | `$HOME/.cache/sccache`        | `/home/other/.cache/sccache`        |
 
 The container-side paths are fixed: they must match the user baked into the
-image (`other`, uid/gid 1000, see `opencode/Dockerfile`).
+image (`other`, uid/gid 1000, see the `opencode/Dockerfile.*` variants).
 
 The toolchain cache mounts (`OPENCODE_PIP_CACHE_DIR`, `OPENCODE_NPM_CACHE_DIR`,
 `OPENCODE_GO_BUILD_CACHE_DIR`, `OPENCODE_GO_MOD_CACHE_DIR`,
@@ -274,7 +280,7 @@ These variables are read by `scripts/launcher.sh` from the shell environment
 |----------------------------|----------------------------|-----------------------------------------------------|
 | `OPENCODE_COMPOSE`         | –                          | Space-separated extra `docker compose` files, merged into the project via `-f` |
 | `OPENCODE_CACHE`           | –                          | Toolchain cache mounts to enable: `false` (default) none, `all` every cache, or space-separated ids (`go`, `node`, `python`, `rust`) |
-| `OPENCODE_BACKEND_ORIGIN`  | `http://127.0.0.1:4096`    | Backend URL used for the health check and TUI attach |
+| `OPENCODE_BACKEND_ORIGIN`  | resolved from `compose port` | Backend URL used for the health check and TUI attach |
 | `SD_YOLO`                  | –                          | `true` (case-insensitive) skips the outside-`HOME` workspace check |
 | `SD_YOLO_HOME`             | –                          | `true` validates workspaces against `SD_REPO_HOME` instead of `$HOME` |
 | `SD_READ_ONLY`             | –                          | `false` (case-insensitive) skips the read-only `.git` override file |
@@ -302,11 +308,12 @@ Details:
   be mounted by default and are now opt-in, because cached toolchain artifacts
   are executed inside the container. Example:
   `export OPENCODE_CACHE="go rust"`.
-- `OPENCODE_BACKEND_ORIGIN` — when a host `opencode` binary is on the `PATH`,
-  the default is `http://127.0.0.1:4096` (the published backend port); the
-  throwaway `tui` container instead defaults to `http://opencode:4096`, the
-  in-network service name. The health check (`_backend_healthy`) always uses
-  the 127.0.0.1 form.
+- `OPENCODE_BACKEND_ORIGIN` — `docker-compose.yml` publishes the backend on a
+  random host port (`"0:4096"`). The launcher resolves the assigned mapping with
+  `opencode:compose port opencode 4096` and uses `http://127.0.0.1:<that port>`
+  for the health check and TUI attach; setting this variable overrides the whole
+  origin. The throwaway `tui` container instead uses `http://opencode:4096`, the
+  in-network service name and port.
 - `SD_YOLO` / `SD_YOLO_HOME` — without these the launcher requires the
   workspace to be a subdirectory of `$HOME` (or of `SD_REPO_HOME` when
   `SD_YOLO_HOME` is `true`) and prompts for confirmation otherwise. `SD_YOLO`
@@ -334,7 +341,6 @@ The launcher supports three network modes controlled by `OPENCODE_NETWORK`:
 
    ```sh
    OPENCODE_NETWORK="@default" opencode
-   # or in .env
    OPENCODE_NETWORK=@default
    ```
 
@@ -379,7 +385,9 @@ OPENCODE_NET_RANGE="172.20.0.0/16" OPENCODE_NET_SUBNET="28" opencode
 
 ### Setting variables
 
-Variables can be set in two ways, with the following precedence:
+Launcher variables are taken from the environment, and used when launching.
+Should not be set in the `.env.` file.
+Compose variables can be set in two ways, with the following precedence:
 
 1. Shell environment (`export OPENCODE_CACHE_DIR=/big/disk/cache`)
 2. A `.env` file placed next to `docker-compose.yml` (loaded automatically)
@@ -389,6 +397,8 @@ Example `.env`:
 
 ```sh
 # .env — lives next to docker-compose.yml; do not commit it
+OPENCODE_IMAGE_URL=devsnowdon/opencode-docker:duck
+OPENCODE_IMAGE_URL_TUI=devsnowdon/opencode-docker:empty
 OPENCODE_CACHE_DIR=/mnt/big-disk/opencode-cache
 OPENCODE_SCCACHE_DIR=/mnt/big-disk/sccache
 ```
@@ -402,6 +412,8 @@ docker compose reads from — or simply export the variables in your shell rc.
 Add a file like the following to `~/opencode/.env`.
 
 ```sh
+OPENCODE_IMAGE_URL=devsnowdon/opencode-docker:full
+OPENCODE_IMAGE_URL_TUI=devsnowdon/opencode-docker:empty
 OPENCODE_CACHE_DIR=/mnt/usb2/storage/opencode/cache/opencode/opencode/cache
 OPENCODE_DATA_DIR=/opt/opencode-data/home/other/.local/share/opencode
 OPENCODE_PIP_CACHE_DIR=/mnt/usb2/storage/opencode/cache/python/pip
@@ -455,39 +467,65 @@ The launcher has two image build stages. The base image
 [devsnowdon/opencode-docker](https://hub.docker.com/r/devsnowdon/opencode-docker)
 that is prebuilt and the user image that is `FROM` the base image. To extend
 the base image see the Dockerfile `/Dockerfile`. To see the base image
-`/opencode/Dockerfile`.
+`/opencode/Dockerfile.*`.
 
 ### Base Dockerfile
 
-The image is built from `opencode/Dockerfile` as a multi-stage build:
+The base image is **layered** into three published variants, each a thin
+`FROM` of the previous one so Docker Hub shares the common layers:
 
-1. **`opencode` stage** — pulls the `opencode` CLI binary from a pinned
-   `ghcr.io/anomalyco/opencode` release.
-2. **Runtime stage** — starts from a pinned Alpine release and installs the
-   toolchains (Go, Node, Python) and CLI packages (git, curl, ripgrep, bash,
-   ...). Every package is pinned to an exact version in the Dockerfile (apk
-   packages, Go tools, Rust toolchain) so builds are reproducible, and the
-   Dockerfile is multi-arch aware (`linux/amd64` + `linux/arm64`).
-3. The full Rust toolchain (`clang`, `lld`, `mold`, rustup, sccache) is only
-   installed when the `INSTALL_RUST=true` build argument is set.
+| Variant | Contents | Tags |
+|---------|----------|------|
+| `empty` | Minimal CLI base (`opencode` binary, `git`, `curl`, `bash`, `ripgrep`, `make`, user `other`) | `:empty` |
+| `duck`  | `empty` + Node.js, npm, Python, pip | `:duck` |
+| `full`  | `duck` + Go + Go tools (`gopls`, `dlv`, `swag`, `golangci-lint`), C toolchain, Rust (opt-in via `INSTALL_RUST`) | `:full`, `:latest` |
+
+The default base image for both the `opencode` service build and the `tui`
+service is `:full` (`:latest` is an alias for back-compat). Set
+`OPENCODE_IMAGE_URL` to a different tag (e.g. `:duck`) to build the compose
+layer on a slimmer base.
+
+The image is built from the `opencode/` Dockerfiles as a multi-stage build:
+
+1. `opencode/Dockerfile.empty` — pulls the `opencode` CLI binary from a pinned
+   `ghcr.io/anomalyco/opencode` release, installs a minimal Alpine runtime and
+   creates the unprivileged `other` user.
+2. `opencode/Dockerfile.duck` — `FROM ${OPENCODE_BASE_URL}:empty`, adds Node.js
+   and Python runtimes.
+3. `opencode/Dockerfile.full` — `FROM ${OPENCODE_BASE_URL}:duck`, adds Go, Go
+   tools, the C/C++ build toolchain, and (when `INSTALL_RUST=true`) the Rust
+   toolchain with rustup, rustfmt, clippy, sccache and the mold linker.
+
+Every package is pinned to an exact version in the Dockerfiles so builds are
+reproducible, and the Dockerfiles are multi-arch aware (`linux/amd64` +
+`linux/arm64`).
 
 #### Local builds (Makefile)
 
-Build the image locally with the latest opencode version run the following:
+Build the layered images locally with the latest opencode version:
 
 ```sh
-make build              # native build, tagged registry.lan:5000/snowdon-dev/opencode
-make build-amd64        # buildx: linux/amd64, loaded into the local daemon
-make build-arm64        # buildx: linux/arm64, loaded into the local daemon
-make build-multi        # buildx: linux/amd64 + linux/arm64 manifest list, pushed
-make pipeline           # native build + push to the registry
-make builder            # create the docker-container buildx builder (once)
+make build            # native build of empty, duck, full (and :latest alias)
+make build-arch       # buildx single arch, loaded (see ARCH= below)
+make build-amd64      # convenience: make build-arch ARCH=amd64
+make build-arm64      # convenience: make build-arch ARCH=arm64
+make build-multi      # buildx multi-arch manifests for all three variants, pushed
+make pipeline         # native build + push all three variants to the registry
+make builder          # create the docker-container buildx builder (once)
+```
+
+To build a single variant only:
+
+```sh
+make build-empty      # only the :empty layer
+make build-duck       # only the :duck layer (requires :empty to exist)
+make build            # builds empty + duck + full in order
 ```
 
 Notes:
 
 - `make build` passes `--build-arg INSTALL_RUST=true` — set `RUST=false`
-  (`make build RUST=false`) to skip the Rust toolchain.
+  (`make build RUST=false`) to skip the Rust toolchain in the full image.
 - Single-arch and multi-arch builds use `docker buildx`. Multi-arch manifest
   pushes need the container-driver builder, created once with `make builder`.
 - The image tag is hardcoded to `registry.lan:5000/snowdon-dev/opencode`.
@@ -513,7 +551,8 @@ Pushing a `v*` tag triggers the CI build (see below).
 
 - **GitHub Actions — `.github/workflows/build-push.yaml`**: on pushes to
   `main`, pushes of a `v*` tag, or manual dispatch, builds the `linux/amd64`
-  and `linux/arm64` images and pushes a multi-arch manifest to Docker Hub.
+  and `linux/arm64` variants (`empty`, `duck`, `full`) in order and pushes the
+  multi-arch manifests to Docker Hub.
   Requires the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets.
 
 ## Testing
