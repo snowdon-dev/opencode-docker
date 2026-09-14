@@ -1,5 +1,5 @@
 services:
-  opencode:
-    volumes:
-      # node
-      - ${OPENCODE_NPM_CACHE_DIR:-${HOME}/.npm}:/home/other/.npm
+    opencode:
+        volumes:
+            # node
+            - ${OPENCODE_NPM_CACHE_DIR:-${HOME}/.npm}:/home/other/.npm

@@ -1,53 +1,57 @@
 services:
-  opencode:
-    cpuset: "${OPENCODE_CPUSET:-2-3}"
-    #image: ghcr.io/anomalyco/opencode:1.14.47
-    #image: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker}
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        # default to duck to prevent large first load
-        #OPENCODE_IMAGE_URL: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker:full}
-        OPENCODE_IMAGE_URL: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker:duck}
-        PROJECT_WORKSPACE: ${WORKSPACE:-${SD_OPENCODE}}
-    # restart: unless-stopped
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - "sleep 999999999d"
-    labels:
-      - "dev.snowdon.opencode.managed=true"
-      - "dev.snowdon.opencode.workspace=${WORKSPACE}"
-    networks:
-      - extra-network
-    volumes:
-      - ${WORKSPACE:-${SD_OPENCODE}}:/workspace
-      - /etc/localtime:/etc/localtime:ro
+    opencode:
+        #image: ghcr.io/anomalyco/opencode:1.14.47
+        #image: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker}
+        build:
+            context: ${OPENCODE_CONTEXT:-.}
+            dockerfile: ${OPENCODE_DOCKERFILE:-Dockerfile}
+            args:
+                # default to duck to prevent large first load
+                #OPENCODE_IMAGE_URL: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker:full}
+                OPENCODE_IMAGE_URL: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker:duck}
+                PROJECT_WORKSPACE: ${WORKSPACE:-${SD_OPENCODE}}
+        # restart: unless-stopped
+        entrypoint: ["/bin/sh", "-c"]
+        command:
+            - "sleep 999999999d"
+        labels:
+            - "dev.snowdon.opencode.managed=true"
+            - "dev.snowdon.opencode.workspace=${WORKSPACE}"
+        networks:
+            - extra-network
+        volumes:
+            - ${WORKSPACE:-${SD_OPENCODE}}:/workspace
+            - /etc/localtime:/etc/localtime:ro
 
-      # opencode
-      - ${OPENCODE_CACHE_DIR:-${HOME}/.cache/opencode/cache}:/home/other/.cache/opencode/cache
-      - ${OPENCODE_DATA_DIR:-${HOME}/.local/share/opencode}:/home/other/.local/share/opencode
-      - ${OPENCODE_CONFIG_DIR:-${HOME}/.config/opencode}:/home/other/.config
-      - ./opencode/agent.md:/home/other/.config/opencode/AGENTS.md:ro
-    ports:
-      # Publish on a random host port; query the assigned port with
-      # `opencode:compose port opencode 4096` when attaching to the backend.
-      - "0:4096"
+            # opencode
+            - ${OPENCODE_CACHE_DIR:-${HOME}/.cache/opencode/cache}:/home/other/.cache/opencode/cache
+            - ${OPENCODE_DATA_DIR:-${HOME}/.local/share/opencode}:/home/other/.local/share/opencode
+            - ${OPENCODE_CONFIG_DIR:-${HOME}/.config/opencode}:/home/other/.config/opencode
+            - ${SD_OPENCODE}/opencode/agent.md:/home/other/.config/opencode/AGENTS.md:ro
+        ports:
+            # Publish on a random host port; query the assigned port with
+            # `opencode:compose port opencode 4096` when attaching to the backend.
+            - "0:4096"
 
-  # only run as one off
-  tui:
-    image: ${OPENCODE_IMAGE_URL_TUI:-devsnowdon/opencode-docker:empty}
-    stdin_open: true
-    tty: true
-    labels:
-      - "dev.snowdon.opencode.managed=true"
-      - "dev.snowdon.opencode.tui=true"
-      - "dev.snowdon.opencode.workspace=${WORKSPACE}"
-    networks:
-      - extra-network
+    # only run as one off
+    tui:
+        image: ${OPENCODE_IMAGE_URL_TUI:-devsnowdon/opencode-docker:empty}
+        stdin_open: true
+        tty: true
+        labels:
+            - "dev.snowdon.opencode.managed=true"
+            - "dev.snowdon.opencode.tui=true"
+            - "dev.snowdon.opencode.workspace=${WORKSPACE}"
+        networks:
+            - extra-network
+        volumes:
+            # opencode's Ctrl+Z "suspend terminal" keybind sends SIGTSTP to the whole
+            # process group (process.kill(0)), which freezes the container session
+            # irrecoverably. This disables it; see opencode/tui.json.
+            - ${SD_OPENCODE}/opencode/tui.json:/home/other/.config/opencode/tui.json:ro
 
 networks:
-  extra-network:
-    labels:
-      dev.snowdon.opencode.managed: true
-      dev.snowdon.opencode.workspace: "${WORKSPACE}"
+    extra-network:
+        labels:
+            dev.snowdon.opencode.managed: true
+            dev.snowdon.opencode.workspace: "${WORKSPACE}"

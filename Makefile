@@ -1,4 +1,4 @@
-.PHONY: build build-arch build-amd64 build-arm64 build-multi publish-multi pipeline builder tag-major tag-minor tag-patch test check check-pipeline
+.PHONY: build build-arch build-amd64 build-arm64 build-multi publish-multi pipeline builder tag-major tag-minor tag-patch test check check-pipeline syntax fmt-check format ci
 
 REGISTRY ?= registry.lan:5000/snowdon-dev/opencode
 ARCH ?= amd64
@@ -12,6 +12,10 @@ SVU ?= svu
 BUILD_ARGS = \
 	--build-arg OPENCODE_VERSION=$(OPENCODE_VERSION) \
 	--build-arg DEVCONTAINER_VERSION=$(DEVCONTAINER_VERSION)
+
+.PHONY: run
+run:
+	SD_OPENCODE="$(pwd)" bash scripts/launcher.sh $(ARGS)
 
 # Build and push the layered base variants in order: each variant's Dockerfile
 # uses FROM ${OPENCODE_BASE_URL}:<parent>, so the parent image must already be
@@ -142,8 +146,38 @@ test:
 
 .PHONY: check
 check:
-	shellcheck scripts/launcher.sh && \
-		shfmt -i 2 -w scripts/launcher.sh
+	shellcheck scripts/launcher.sh
+
+# In-place formatting for local dev. The read-only `check` target is what CI
+# runs; the pipeline never rewrites the tree.
+.PHONY: format
+format:
+	shfmt -i 4 -w scripts/launcher.sh
+
+# Bash syntax-check every shell script (parse errors, not semantics).
+.PHONY: syntax
+syntax:
+	bash -n scripts/launcher.sh scripts/setup.sh tests/run_tests.sh \
+		tests/mockbin/docker tests/mockbin/opencode tests/mockbin/curl
+
+# Formatting test against .editorconfig. The checker binary is installed as
+# `editorconfig-checker` by `go install` but as `ec` by the Alpine package, so
+# accept either. The config file is passed explicitly because config
+# auto-discovery differs by version (`ec` 3.0.x looks for .ecrc, newer
+# releases for .editorconfig-checker.json), and the scan path is passed
+# explicitly because `ec` 3.0.x silently checks nothing when no path is given.
+# See .editorconfig-checker.json for the remaining exclusions.
+.PHONY: fmt-check
+fmt-check:
+	@[ -n "$(EC_BIN)" ] || { echo "Error: editorconfig-checker (or ec) is not installed" >&2; exit 1; }
+	$(EC_BIN) -config .editorconfig-checker.json .
+
+# Locate the editorconfig-checker binary under either installed name.
+EC_BIN := $(shell command -v editorconfig-checker 2>/dev/null || command -v ec 2>/dev/null)
+
+# Complete local/CI routine: bash syntax, shell checks, formatting, tests.
+.PHONY: ci
+ci: syntax check fmt-check test
 
 .PHONY: check-pipeline
 check-pipeline: check test

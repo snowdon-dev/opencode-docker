@@ -79,6 +79,10 @@ ENV BUN_RUNTIME_TRANSPILER_CACHE_PATH=${BUN_RUNTIME_TRANSPILER_CACHE_PATH}
 
 RUN mkdir -p /home/${USERNAME}/.config/opencode
 COPY --chown=${USERNAME}:${USERNAME} opencode/agent.md /home/${USERNAME}/.config/opencode/AGENTS.md
+# Disable the TUI's Ctrl+Z "suspend terminal" keybind. opencode implements it
+# as process.kill(0, "SIGTSTP"), stopping the whole container process group;
+# inside a docker tty that freezes the session with no way to Ctrl+C/fg back.
+COPY --chown=${USERNAME}:${USERNAME} opencode/tui.json /home/${USERNAME}/.config/opencode/tui.json
 
 USER root
 COPY --from=opencode /usr/local/bin/opencode /usr/local/bin/opencode

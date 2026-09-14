@@ -14,11 +14,11 @@ set -u
 OPENCODE_TEST_DOCKER_LOG="${OPENCODE_TEST_DOCKER_LOG:-}"
 
 mock_log() {
-  if [[ -n "$OPENCODE_TEST_DOCKER_LOG" ]]; then
-    printf '%s\n' "$*" >>"$OPENCODE_TEST_DOCKER_LOG"
-  else
-    printf 'MOCK DOCKER: %s\n' "$*"
-  fi
+    if [[ -n "$OPENCODE_TEST_DOCKER_LOG" ]]; then
+        printf '%s\n' "$*" >>"$OPENCODE_TEST_DOCKER_LOG"
+    else
+        printf 'MOCK DOCKER: %s\n' "$*"
+    fi
 }
 
 # Record the full invocation as a single log line for easy diffing.
@@ -26,129 +26,148 @@ mock_log "docker $*"
 
 # Determine the compose subcommand (first positional that is not a flag).
 if [[ "$1" == "compose" ]]; then
-  shift
-  sub=""
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      -p|-f|--project-name|--file) shift 2 ;;
-      -*) shift ;;
-      *) sub="$1"; shift; break ;;
-    esac
-  done
-  case "$sub" in
+    shift
+    sub=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        -p | -f | --project-name | --file) shift 2 ;;
+        -*) shift ;;
+        *)
+            sub="$1"
+            shift
+            break
+            ;;
+        esac
+    done
+    case "$sub" in
     up)
-      if [[ "${OPENCODE_TEST_BUILD_FAIL:-}" == "1" ]]; then
-        echo "mocked: up FAIL" >&2
-        exit 1
-      fi
-      echo "mocked: up"
-      ;;
+        if [[ "${OPENCODE_TEST_BUILD_FAIL:-}" == "1" ]]; then
+            echo "mocked: up FAIL" >&2
+            exit 1
+        fi
+        echo "mocked: up"
+        ;;
     down)
-      echo "mocked: down"
-      ;;
+        echo "mocked: down"
+        ;;
     ps)
-      if [[ "${OPENCODE_TEST_NO_CONTAINER:-}" == "1" ]]; then
-        # Simulate "no running container" so the launcher falls back to
-        # `docker compose run` instead of `exec`.
-        exit 0
-      fi
-      echo "mocked-container-id"
-      ;;
+        if [[ "${OPENCODE_TEST_NO_CONTAINER:-}" == "1" ]]; then
+            # Simulate "no running container" so the launcher falls back to
+            # `docker compose run` instead of `exec`.
+            exit 0
+        fi
+        echo "mocked-container-id"
+        ;;
     exec)
-      # Skip flags, then skip service name, then handle remaining command.
-      while [[ $# -gt 0 && "$1" == -* ]]; do shift; done
-      [[ $# -gt 0 ]] && shift
-      # If the remaining words begin with sh -c <body>, echo the body back so
-      # the launcher's command substitution capture works.
-      if [[ "${1:-}" == "sh" && "${2:-}" == "-c" ]]; then
-        printf '%s\n' "${3:-}"
-      else
-        echo "mocked: exec ${*}"
-      fi
-      ;;
+        # Skip flags, then skip service name, then handle remaining command.
+        while [[ $# -gt 0 && "$1" == -* ]]; do shift; done
+        [[ $# -gt 0 ]] && shift
+        # If the remaining words begin with sh -c <body>, echo the body back so
+        # the launcher's command substitution capture works.
+        if [[ "${1:-}" == "sh" && "${2:-}" == "-c" ]]; then
+            printf '%s\n' "${3:-}"
+        else
+            echo "mocked: exec ${*}"
+        fi
+        ;;
     run)
-      # Mirrors exec: after consuming flags/service, if the remaining words
-      # begin with sh -c <body>, echo the body back so command-substitution
-      # capture works for the one-off (compose run) path too.
-      while [[ $# -gt 0 && "$1" == -* ]]; do shift; done
-      [[ $# -gt 0 ]] && shift
-      if [[ "${1:-}" == "sh" && "${2:-}" == "-c" ]]; then
-        printf '%s\n' "${3:-}"
-      else
-        echo "mocked: run ${*}"
-      fi
-      ;;
+        # Mirrors exec: after consuming flags/service, if the remaining words
+        # begin with sh -c <body>, echo the body back so command-substitution
+        # capture works for the one-off (compose run) path too.
+        while [[ $# -gt 0 && "$1" == -* ]]; do shift; done
+        [[ $# -gt 0 ]] && shift
+        if [[ "${1:-}" == "sh" && "${2:-}" == "-c" ]]; then
+            printf '%s\n' "${3:-}"
+        else
+            echo "mocked: run ${*}"
+        fi
+        ;;
     port)
-      # Simulate `docker compose port opencode 4096`, which prints the host
-      # mapping for the service's private port. The port is random when the
-      # compose file publishes "0:4096"; OPENCODE_TEST_HOST_PORT overrides it.
-      # Fails (like a missing mapping / stopped container) on demand.
-      if [[ "${OPENCODE_TEST_NO_CONTAINER:-}" == "1" || "${OPENCODE_TEST_PORT_FAIL:-}" == "1" ]]; then
-        exit 1
-      fi
-      printf '0.0.0.0:%s\n' "${OPENCODE_TEST_HOST_PORT:-32768}"
-      ;;
+        # Simulate `docker compose port opencode 4096`, which prints the host
+        # mapping for the service's private port. The port is random when the
+        # compose file publishes "0:4096"; OPENCODE_TEST_HOST_PORT overrides it.
+        # Fails (like a missing mapping / stopped container) on demand.
+        if [[ "${OPENCODE_TEST_NO_CONTAINER:-}" == "1" || "${OPENCODE_TEST_PORT_FAIL:-}" == "1" ]]; then
+            exit 1
+        fi
+        printf '0.0.0.0:%s\n' "${OPENCODE_TEST_HOST_PORT:-32768}"
+        ;;
     *)
-      echo "mocked: compose $sub $*"
-      ;;
-  esac
-elif [[ "$1" == "ps" ]]; then
-  shift
-  # Simulate "no managed containers" so ls can exercise its empty listing.
-  if [[ "${OPENCODE_TEST_NO_CONTAINER:-}" == "1" ]]; then
-    exit 0
-  fi
-  # Normal case: report a single managed container. With the -q flag only the
-  # container id is printed, otherwise the "<id>\t<workspace>" form. When
-  # OPENCODE_TEST_CONFLICT=1 the inspect mock returns a *different* workspace
-  # so the launcher can exercise its coexistence warning.
-  quiet=0
-  for a in "$@"; do [[ "$a" == "-q" ]] && quiet=1; done
-  if [[ "$quiet" == "1" ]]; then
-    echo "c1"
-  elif [[ "${OPENCODE_TEST_CONFLICT:-}" == "1" ]]; then
-    echo "c1	/workspace/other"
-  else
-    echo "c1	$PWD"
-  fi
-elif [[ "$1" == "inspect" ]]; then
-  shift
-  # Return the workspace value from the container's Config.Labels. When
-  # OPENCODE_TEST_CONFLICT=1 the label resolves to a *different* workspace so
-  # the launcher can see a coexisting container and warn about it.
-  f=""
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --format) f="$2"; shift 2 ;;
-      -*) shift ;;
-      *) shift ;;
+        echo "mocked: compose $sub $*"
+        ;;
     esac
-  done
-  if [[ "$f" == *"State.Status"* ]]; then
-    # Combined record used by opencode:ls: id, status, workspace, project,
-    # tui, sentinel. The trailing '.' keeps empty trailing label columns in
-    # place through the launcher's `read -a` splitting. The format must use a
-    # Go string literal ({{"\t"}}) for field separators: docker inspect does
-    # NOT interpolate a raw \t, so reflect that here by emitting literal
-    # backslash-t when the format lacks the Go literal.
-    sep="\t"
-    if [[ "$f" == *'{{"\t"}}'* ]]; then
-      sep=$'\t'
+elif [[ "$1" == "ps" ]]; then
+    shift
+    # Simulate "no managed containers" so ls can exercise its empty listing.
+    if [[ "${OPENCODE_TEST_NO_CONTAINER:-}" == "1" ]]; then
+        exit 0
     fi
-    printf 'c1%srunning%s%s%sws%sfalse%s.\n' "$sep" "$sep" "$PWD" "$sep" "$sep" "$sep"
-  elif [[ "$f" == *'{{"\t"}}'* ]]; then
-    # Combined record used by _find_docker_managed (oneoff + tui labels).
-    # Both values render empty so the container passes the oneoff filter.
-    printf '\t\t.\n'
-  elif [[ "${OPENCODE_TEST_CONFLICT:-}" == "1" ]]; then
-    echo "/workspace/other"
-  else
-    echo "$PWD"
-  fi
-  # Note: f is the format string; not needed to mock the value.
+    # A discovery scoped to the worktree-parent label never finds anything in the
+    # fresh test sandbox (it has no worktree-child containers). Honouring the
+    # filter here keeps the launcher's worktree-child detection in
+    # _opencode_args_prepare from mis-reading the generic "c1" mock container as
+    # a worktree of the sandbox workspace (which would clobber the project name).
+    prev=""
+    for a in "$@"; do
+        if [[ "$prev" == "--filter" && "$a" == *"label=dev.snowdon.opencode.parent="* ]]; then
+            exit 0
+        fi
+        prev="$a"
+    done
+    # Normal case: report a single managed container. With the -q flag only the
+    # container id is printed, otherwise the "<id>\t<workspace>" form. When
+    # OPENCODE_TEST_CONFLICT=1 the inspect mock returns a *different* workspace
+    # so the launcher can exercise its coexistence warning.
+    quiet=0
+    for a in "$@"; do [[ "$a" == "-q" ]] && quiet=1; done
+    if [[ "$quiet" == "1" ]]; then
+        echo "c1"
+    elif [[ "${OPENCODE_TEST_CONFLICT:-}" == "1" ]]; then
+        echo "c1	/workspace/other"
+    else
+        echo "c1	$PWD"
+    fi
+elif [[ "$1" == "inspect" ]]; then
+    shift
+    # Return the workspace value from the container's Config.Labels. When
+    # OPENCODE_TEST_CONFLICT=1 the label resolves to a *different* workspace so
+    # the launcher can see a coexisting container and warn about it.
+    f=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        --format)
+            f="$2"
+            shift 2
+            ;;
+        -*) shift ;;
+        *) shift ;;
+        esac
+    done
+    if [[ "$f" == *"State.Status"* ]]; then
+        # Combined record used by opencode:ls: id, status, workspace, project,
+        # tui, sentinel. The trailing '.' keeps empty trailing label columns in
+        # place through the launcher's `read -a` splitting. The format must use a
+        # Go string literal ({{"\t"}}) for field separators: docker inspect does
+        # NOT interpolate a raw \t, so reflect that here by emitting literal
+        # backslash-t when the format lacks the Go literal.
+        sep="\t"
+        if [[ "$f" == *'{{"\t"}}'* ]]; then
+            sep=$'\t'
+        fi
+        printf 'c1%srunning%s%s%sws%sfalse%s.\n' "$sep" "$sep" "$PWD" "$sep" "$sep" "$sep"
+    elif [[ "$f" == *'{{"\t"}}'* ]]; then
+        # Combined record used by _find_docker_managed (oneoff + tui labels).
+        # Both values render empty so the container passes the oneoff filter.
+        printf '\t\t.\n'
+    elif [[ "${OPENCODE_TEST_CONFLICT:-}" == "1" ]]; then
+        echo "/workspace/other"
+    else
+        echo "$PWD"
+    fi
+    # Note: f is the format string; not needed to mock the value.
 elif [[ "$1" == "rm" ]]; then
-  shift
-  echo "mocked: rm $*"
+    shift
+    echo "mocked: rm $*"
 else
-  echo "mocked: unknown $*"
+    echo "mocked: unknown $*"
 fi

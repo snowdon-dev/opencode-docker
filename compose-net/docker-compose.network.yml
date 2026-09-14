@@ -1,15 +1,15 @@
 services:
-  opencode:
-    networks:
-      - extra-network
-  tui:
-    networks:
-      - extra-network
+    opencode:
+        networks:
+            - extra-network
+    tui:
+        networks:
+            - extra-network
 
 networks:
-  extra-network:
-    external: true
-    name: ${OPENCODE_NETWORK}
-    labels:
-      dev.snowdon.opencode.managed: true
-      dev.snowdon.opencode.workspace: "${WORKSPACE}"
+    extra-network:
+        external: true
+        name: ${OPENCODE_NETWORK}
+        labels:
+            dev.snowdon.opencode.managed: true
+            dev.snowdon.opencode.workspace: "${WORKSPACE}"

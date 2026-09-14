@@ -1,19 +1,19 @@
 name: build & push opencode (Docker Hub)
 
 on:
-  push:
-    tags:
-      - 'v*'
-  workflow_dispatch:
-    inputs:
-      rust:
-        description: 'Install the full Rust toolchain (INSTALL_RUST=true)'
-        type: choice
-        required: false
-        default: 'true'
-        options:
-          - 'true'
-          - 'false'
+    push:
+        tags:
+            - "v*"
+    workflow_dispatch:
+        inputs:
+            rust:
+                description: "Install the full Rust toolchain (INSTALL_RUST=true)"
+                type: choice
+                required: false
+                default: "true"
+                options:
+                    - "true"
+                    - "false"
 
 #    branches:
 #      - main
@@ -26,107 +26,107 @@ on:
 
 # Serialize runs per branch/tag so `latest` is never pushed concurrently.
 concurrency:
-  group: docker-build-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+    group: docker-build-${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
 
 jobs:
-  build-push:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    build-push:
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
 
-    steps:
-      - name: Checkout latest tag
-        uses: actions/checkout@v6
+        steps:
+            - name: Checkout latest tag
+              uses: actions/checkout@v6
 
-      - name: Resolve Docker Hub image name
-        id: image
-        env:
-          DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
-        run: echo "image=${DOCKERHUB_IMAGE:-devsnowdon/opencode-docker}" >> "$GITHUB_OUTPUT"
+            - name: Resolve Docker Hub image name
+              id: image
+              env:
+                  DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
+              run: echo "image=${DOCKERHUB_IMAGE:-devsnowdon/opencode-docker}" >> "$GITHUB_OUTPUT"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+            - name: Set up QEMU
+              uses: docker/setup-qemu-action@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@v4
 
-      # Requires repo secrets DOCKERHUB_USERNAME and DOCKERHUB_TOKEN
-      # (a Docker Hub access token, not the account password).
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+            # Requires repo secrets DOCKERHUB_USERNAME and DOCKERHUB_TOKEN
+            # (a Docker Hub access token, not the account password).
+            - name: Log in to Docker Hub
+              uses: docker/login-action@v4
+              with:
+                  username: ${{ secrets.DOCKERHUB_USERNAME }}
+                  password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Compute image tags for full
-        id: tags
-        run: |
-          IMAGE="${{ steps.image.outputs.image }}"
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            TAGS="${IMAGE}:${GITHUB_REF_NAME#v},${IMAGE}:latest"
-          else
-            TAGS="${IMAGE}:latest,${IMAGE}:git-${GITHUB_SHA::7}"
-          fi
-          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+            - name: Compute image tags for full
+              id: tags
+              run: |
+                  IMAGE="${{ steps.image.outputs.image }}"
+                  if [ "${{ github.ref_type }}" = "tag" ]; then
+                    TAGS="${IMAGE}:${GITHUB_REF_NAME#v},${IMAGE}:latest"
+                  else
+                    TAGS="${IMAGE}:latest,${IMAGE}:git-${GITHUB_SHA::7}"
+                  fi
+                  echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
 
-      - name: Get latest release
-        id: release
-        uses: actions/github-script@v8
-        with:
-          script: |
-            const { data } = await github.rest.repos.getLatestRelease({
-              owner: 'anomalyco',
-              repo: 'opencode'
-            });
-            const tag = data.tag_name;
-            const version = tag.startsWith('v') ? tag.slice(1) : tag;
-            core.setOutput('latest', version);
+            - name: Get latest release
+              id: release
+              uses: actions/github-script@v8
+              with:
+                  script: |
+                      const { data } = await github.rest.repos.getLatestRelease({
+                        owner: 'anomalyco',
+                        repo: 'opencode'
+                      });
+                      const tag = data.tag_name;
+                      const version = tag.startsWith('v') ? tag.slice(1) : tag;
+                      core.setOutput('latest', version);
 
-      # The base image is layered: empty (base) <- duck (node+python) <- full
-      # (go/c/rust). Each step pulls the parent manifest it FROMs, so the build
-      # and push runs in empty -> duck -> full order.
-      - name: Build and push empty
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: opencode/Dockerfile.empty
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.image.outputs.image }}:empty
-          build-args: |
-            OPENCODE_VERSION=${{ steps.release.outputs.latest }}
-            DEVCONTAINER_VERSION=${{github.ref}}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            # The base image is layered: empty (base) <- duck (node+python) <- full
+            # (go/c/rust). Each step pulls the parent manifest it FROMs, so the build
+            # and push runs in empty -> duck -> full order.
+            - name: Build and push empty
+              uses: docker/build-push-action@v7
+              with:
+                  context: .
+                  file: opencode/Dockerfile.empty
+                  platforms: linux/amd64,linux/arm64
+                  push: true
+                  tags: ${{ steps.image.outputs.image }}:empty
+                  build-args: |
+                      OPENCODE_VERSION=${{ steps.release.outputs.latest }}
+                      DEVCONTAINER_VERSION=${{github.ref}}
+                  cache-from: type=gha
+                  cache-to: type=gha,mode=max
 
-      - name: Build and push duck
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: opencode/Dockerfile.duck
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.image.outputs.image }}:duck
-          build-args: |
-            OPENCODE_BASE_URL=${{ steps.image.outputs.image }}
-            OPENCODE_VERSION=${{ steps.release.outputs.latest }}
-            DEVCONTAINER_VERSION=${{github.ref}}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            - name: Build and push duck
+              uses: docker/build-push-action@v7
+              with:
+                  context: .
+                  file: opencode/Dockerfile.duck
+                  platforms: linux/amd64,linux/arm64
+                  push: true
+                  tags: ${{ steps.image.outputs.image }}:duck
+                  build-args: |
+                      OPENCODE_BASE_URL=${{ steps.image.outputs.image }}
+                      OPENCODE_VERSION=${{ steps.release.outputs.latest }}
+                      DEVCONTAINER_VERSION=${{github.ref}}
+                  cache-from: type=gha
+                  cache-to: type=gha,mode=max
 
-      - name: Build and push full
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: opencode/Dockerfile.full
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.tags.outputs.tags }},${{ steps.image.outputs.image }}:full
-          build-args: |
-            OPENCODE_BASE_URL=${{ steps.image.outputs.image }}
-            INSTALL_RUST=${{ inputs.rust || 'true' }}
-            OPENCODE_VERSION=${{ steps.release.outputs.latest }}
-            DEVCONTAINER_VERSION=${{github.ref}}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            - name: Build and push full
+              uses: docker/build-push-action@v7
+              with:
+                  context: .
+                  file: opencode/Dockerfile.full
+                  platforms: linux/amd64,linux/arm64
+                  push: true
+                  tags: ${{ steps.tags.outputs.tags }},${{ steps.image.outputs.image }}:full
+                  build-args: |
+                      OPENCODE_BASE_URL=${{ steps.image.outputs.image }}
+                      INSTALL_RUST=${{ inputs.rust || 'true' }}
+                      OPENCODE_VERSION=${{ steps.release.outputs.latest }}
+                      DEVCONTAINER_VERSION=${{github.ref}}
+                  cache-from: type=gha
+                  cache-to: type=gha,mode=max

@@ -11,9 +11,9 @@ set -u
 OPENCODE_TEST_DOCKER_LOG="${OPENCODE_TEST_DOCKER_LOG:-}"
 
 if [[ -n "$OPENCODE_TEST_DOCKER_LOG" ]]; then
-  printf 'opencode %s\n' "$*" >>"$OPENCODE_TEST_DOCKER_LOG"
+    printf 'opencode %s\n' "$*" >>"$OPENCODE_TEST_DOCKER_LOG"
 else
-  printf 'MOCK OPENCODE: %s\n' "$*"
+    printf 'MOCK OPENCODE: %s\n' "$*"
 fi
 
 exit 0

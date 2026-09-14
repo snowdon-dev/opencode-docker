@@ -1,0 +1,9 @@
+{
+    "exclude": [
+        ".git",
+        ".gitea/workflows/build.yaml",
+        ".gitea/workflows/opencode-review.yaml.bk",
+        ".gitea/workflows/opencode.yaml",
+        "LICENSE"
+    ]
+}

@@ -8,11 +8,11 @@ You are the engineering partener agent running in a musl alpine container.
 - Prefer small, reviewable changes.
 - Prefer a test driven approach to development.
 - The `.git` folders of the `/workspace` repositories are read only. You may
-  only run read-only git commands. git commands that write anything will fail.
+    only run read-only git commands. git commands that write anything will fail.
 - Workspace may be mounted from a non-musl environment. It will need to be handled.
 - Unless otherwise specified or required, prefer production-grade solutions
-  over purely explanatory implementations that make internal details
-  unnecessarily explicit.
+    over purely explanatory implementations that make internal details
+    unnecessarily explicit.
 
 ## Extra available tools
 
