@@ -46,6 +46,7 @@ opencode -c --auto
 opencode /home/other/somerepo
 opencode:exec /home/other/somerepo sh
 opencode:down /home/other/somerepo
+opencode:delete "$(pwd)" --all
 opencode:scaffold /home/pi/repos/gists/project-1 "Create basic hello world html project"
 opencode:scaffold gists/project-1 "Create basic hello world html project"
 opencode:scaffold project-2 "$(cat /tmp/sometask.md)"
@@ -71,8 +72,8 @@ opencode:setup sh -c 'cd front-end && npm install' && opencode
   variables
 - [ ] Security: Add project specific OPENCODE_DATA_DIR and cache via argument
   flags
-- [ ] Security: Argument based worktree helpers to isolate node_modules or
-  mount a tmp_dir
+- [x] Security: Resolve worktree parent (via readonly mount) to allow isolate
+  node_modules, while enabling git usage
 - [x] Security: Path prompt check when outside `$HOME`, or `$SD_REPO_HOME` when
   `$SD_YOLO_HOME` equals true
 - [x] Security: Defined per-workspace Docker networks with automatic subnet allocation

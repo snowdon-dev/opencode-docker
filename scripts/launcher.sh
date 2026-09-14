@@ -199,7 +199,6 @@ _net_parse() {
 
   # A bare prefix has no "/mask" so infer 8 bits per given octet (172.20 -> /16)
   # capping at /24
-  # TODO: Cap can be increased to allow smaller OPENCODE_NET_SUBNET="28"
   if [[ "$NETWORK_RANGE" != */* ]]; then
     mask=$((${#octs[@]} * 8))
     ((mask > 29)) && mask=29
@@ -405,6 +404,100 @@ _sanitize_network_name() {
   printf '%s\n' "$name"
 }
 
+_assert_maybe_check_outside_root() {
+  local ws_out home ws_out_normalized valid_subdir answer
+  ws_out="$1"
+
+  if [[ ! ${SD_YOLO:-} =~ ^[Tt][Rr][Uu][Ee]$ ]]; then
+    # Remove trailing slashes, while preserving "/".
+    if [[ "$SD_YOLO_HOME" == "true" ]]; then
+      home="$SD_REPO_HOME"
+    else
+      home="$HOME"
+    fi
+    while [[ $home != "/" && $home == */ ]]; do
+      home=${home%/}
+    done
+
+    ws_out_normalized=$ws_out
+    while [[ $ws_out_normalized != "/" && $ws_out_normalized == */ ]]; do
+      ws_out_normalized=${ws_out_normalized%/}
+    done
+
+    valid_subdir=0
+
+    if [[ $home == "/" ]]; then
+      # Any non-root absolute path is a subdirectory of "/".
+      if [[ $ws_out_normalized != "/" &&
+        $ws_out_normalized == /* ]]; then
+        valid_subdir=1
+      fi
+    elif [[ $ws_out_normalized == "$home"/* ]]; then
+      # The "$home/*" pattern excludes "$home" itself.
+      valid_subdir=1
+    fi
+
+    if ((!valid_subdir)); then
+      printf 'Output directory is outside a subdirectory of HOME:\n  %s\n' "$ws_out"
+      read -r -p "Continue anyway? [y/N] " answer </dev/tty
+
+      case ${answer,,} in
+      y | yes) ;;
+      *)
+        printf 'Aborted.\n' >&2
+        exit 1
+        ;;
+      esac
+    fi
+  fi
+}
+
+# Print NUL-terminated every .git directory under <ws>, for read-only mounting.
+# Vendor/build/test-artifact directories are pruned so throwaway nested repos
+# (e.g. node_modules, tests/.tmp sandboxes) aren't mounted or counted, which
+# keeps the compose config stable across command invocations.
+# TODO: read the exclude list from .gitignore?
+_find_workspace_git_dirs() {
+  local ws="$1"
+  find "$ws" \
+    \( -name node_modules -o -name .cargo -o -name target -o \
+    -name .tmp -o -name vendor \) -prune -o \
+    -type d -name .git -print0
+}
+
+# Print the parent repository's git dir when <git_path> is a worktree .git file,
+# or nothing when it is a regular git dir directory. A worktree's .git is a file
+# whose first line is "gitdir: <path>", pointing into <parent>/.git/worktrees/
+# <name>; stripping the worktrees/<name> suffix yields the parent's git dir.
+_git_worktree_parent() {
+  local git_path="$1"
+  local gitdir parent
+  [[ -f "$git_path" ]] || return 0
+  gitdir="$(sed -n 's/^gitdir: //p' "$git_path")"
+  [[ -n "$gitdir" ]] || return 0
+  parent="${gitdir%/worktrees/*}"
+  [[ -d "$parent" ]] || return 0
+  printf '%s' "$parent"
+}
+
+# Write a Docker Compose override mounting each entry of the array named by $1
+# (elements are "source:/container/path" pairs) read-only onto the opencode
+# service. tmp_compose_dir/tmp_compose_file are set so the EXIT trap's _cleanup
+# removes the override afterwards.
+_write_git_override() {
+  local -n mounts="$1"
+  tmp_compose_dir="$(mktemp -d)"
+  tmp_compose_file="$tmp_compose_dir/docker-compose.git.yml"
+  {
+    printf '%s\n' 'services:'
+    printf '%s\n' '  opencode:'
+    printf '%s\n' '    volumes:'
+    for mount in "${mounts[@]}"; do
+      printf '      - %s:ro\n' "$mount"
+    done
+  } >"$tmp_compose_file"
+}
+
 # Prepares the Docker Compose arguments. This function sets up the project
 # configuration including network settings and git directory mounts.
 _opencode_args_prepare() {
@@ -419,6 +512,7 @@ _opencode_args_prepare() {
   )
 
   # TODO: Transient volumes - OPENCODE_DATA=false disables persisted volume
+
   # OPENCODE_CACHE=false disables the cache volumes, "all" adds all
   # "go python" adds go and python. Values are case-insensitive.
   if [[ -n "${OPENCODE_CACHE}" ]]; then
@@ -478,44 +572,29 @@ _opencode_args_prepare() {
   # modification inside the container. Set SD_READ_ONLY=false to disable this
   # and mount the workspace without the read-only git override file.
   if [[ ! ${SD_READ_ONLY:-} =~ ^[Ff][Aa][Ll][Ss][Ee]$ ]]; then
-    # Create temporary directory for git compose configuration
-    tmp_compose_dir="$(mktemp -d)"
-    tmp_compose_file="$tmp_compose_dir/docker-compose.git.yml"
-
-    # Find all .git directories in workspace for read-only mounting
-    # This ensures git repositories are accessible but protected from modifications
-    # SECURITY NOTE: Current implementation mounts all .git directories found within
-    # the workspace. A future improvement should consider whether to traverse up to
-    # the git root directory or leave directories as-is for security isolation.
-    #
-    # Vendor/build/test-artifact directories are pruned so throwaway nested repos
-    # (e.g. node_modules, tests/.tmp sandboxes) aren't mounted or counted, which
-    # keeps the compose config stable across command invocations.
-    # TODO: read the exlcude list from .gitignore?
-    git_dirs=()
+    # SECURITY NOTE: all .git directories found within the workspace are mounted
+    # read-only, plus the parent git dir when the workspace is a worktree. A
+    # future improvement should consider whether to traverse up to the git root
+    # directory or leave directories as-is for security isolation.
+    local -a git_mounts=()
+    local git_dir parent
     while IFS= read -r -d '' git_dir; do
-      git_dirs+=("$git_dir")
+      git_mounts+=("$git_dir:/workspace/${git_dir#"$ws_out"/}")
       echo "read-only locking dir: $git_dir"
-    done < <(find "$ws_out" \
-      \( -name node_modules -o -name .cargo -o -name target -o \
-      -name .tmp -o -name vendor \) -prune -o \
-      -type d -name .git -print0)
+    done < <(_find_workspace_git_dirs "$ws_out")
 
-    # Generate docker-compose override file if git directories were found
-    if ((${#git_dirs[@]} > 0)); then
-      {
-        printf '%s\n' 'services:'
-        printf '%s\n' '  opencode:'
-        printf '%s\n' '    volumes:'
+    # A worktree's .git is a file whose gitdir pointer lives in the parent
+    # repository. Mount the parent git dir read-only at its own host path so
+    # the pointer resolves inside the container too.
+    parent="$(_git_worktree_parent "$ws_out/.git")"
+    if [[ -n "$parent" ]]; then
+      _assert_maybe_check_outside_root "$parent"
+      git_mounts+=("$parent:$parent")
+      echo "read-only locking worktree parent: $parent"
+    fi
 
-        for git_dir in "${git_dirs[@]}"; do
-          rel="${git_dir#"$ws_out"/}"
-          printf '      - %s:/workspace/%s:ro\n' \
-            "$git_dir" \
-            "$rel"
-        done
-      } >"$tmp_compose_file"
-
+    if ((${#git_mounts[@]} > 0)); then
+      _write_git_override git_mounts
       args_out+=(-f "$tmp_compose_file")
     fi
   fi
@@ -1747,54 +1826,6 @@ opencode:help() {
   fi
 }
 
-_maybe_check_outside_home() {
-  local ws_out home ws_out_normalized valid_subdir answer
-  ws_out="$1"
-
-  if [[ ! ${SD_YOLO:-} =~ ^[Tt][Rr][Uu][Ee]$ ]]; then
-    # Remove trailing slashes, while preserving "/".
-    if [[ "$SD_YOLO_HOME" == "true" ]]; then
-      home="$SD_REPO_HOME"
-    else
-      home="$HOME"
-    fi
-    while [[ $home != "/" && $home == */ ]]; do
-      home=${home%/}
-    done
-
-    ws_out_normalized=$ws_out
-    while [[ $ws_out_normalized != "/" && $ws_out_normalized == */ ]]; do
-      ws_out_normalized=${ws_out_normalized%/}
-    done
-
-    valid_subdir=0
-
-    if [[ $home == "/" ]]; then
-      # Any non-root absolute path is a subdirectory of "/".
-      if [[ $ws_out_normalized != "/" &&
-        $ws_out_normalized == /* ]]; then
-        valid_subdir=1
-      fi
-    elif [[ $ws_out_normalized == "$home"/* ]]; then
-      # The "$home/*" pattern excludes "$home" itself.
-      valid_subdir=1
-    fi
-
-    if ((!valid_subdir)); then
-      printf 'Output directory is outside a subdirectory of HOME:\n  %s\n' "$ws_out"
-      read -r -p "Continue anyway? [y/N] " answer </dev/tty
-
-      case ${answer,,} in
-      y | yes) ;;
-      *)
-        printf 'Aborted.\n' >&2
-        exit 1
-        ;;
-      esac
-    fi
-  fi
-}
-
 # Main entry point for the opencode launcher script
 # This function parses command-line arguments and dispatches to the
 # appropriate handler function based on the specified command.
@@ -1966,7 +1997,7 @@ main() {
 
   # Skip this check when SD_YOLO is set to "true" (case-insensitive).
   # Check if the workspace lies outside of a sub directory of $HOME.
-  _maybe_check_outside_home "$ws_out"
+  _assert_maybe_check_outside_root "$ws_out"
 
   # Set up compose directory and project name
   local proj
