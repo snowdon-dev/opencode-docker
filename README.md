@@ -29,11 +29,14 @@ opencode:setup npm install
 opencode:down
 opencode:stop
 opencode:stop --all
+opencode:stop --other
 opencode:delete
 opencode:delete --all
+opencode:delete --other
 opencode:ls
 opencode:list
 opencode:ls --all
+opencode:ls --other
 opencode:ls --quiet ~/somerepo
 opencode:exec sh
 opencode:execute sh
@@ -55,8 +58,8 @@ opencode:scaffold gists/project-1 "Create basic hello world html project"
 opencode:scaffold project-2 "$(cat /tmp/sometask.md)"
 
 mkdir "$HOME/repos/gists/gotester" && cd "$HOME/repos/gists/gotester"
-oc:sf ./ "Create a hello world go project."
-oc:sf ./newmodule "Create a golang package that exports a function that adds integers. No go.mod"
+ocsf ./ "Create a hello world go project."
+ocsf ./newmodule "Create a golang package that exports a function that adds integers. No go.mod"
 
 OPENCODE_IMAGE_URL="my-custom-image:latest" opencode
 OPENCODE_IMAGE_URL="devsnowdon/opencode-docker:duck" opencode
@@ -134,7 +137,7 @@ custom configuration or custom profiles.
 the local image from the repository `Dockerfile` (which layers on top of the
 published [base image](https://hub.docker.com/r/devsnowdon/opencode-docker))
 unless `OPENCODE_IMAGE_URL` points at a prebuilt image. Run `opencode:update`
-(alias `oc:u`).
+(alias `ocud`).
 
 When `opencode` (the `start` command) runs, the launcher starts an `opencode
 serve` backend inside the container, waits until it is healthy, and then
@@ -157,9 +160,9 @@ you prefer.
 Instead of running the compose directly, install as an omz plugin for handy
 commands.
 
-`omz/opencode.zsh` provides shell aliases (`opencode`, `oc`, `oc:s`,
-`oc:u`, `oc:d`, `oc:del`, `oc:c`, ...) wrapping the launcher. It also defines
-`opencode:update` (alias `oc:u`), which pulls the base image and rebuilds the
+`omz/opencode.zsh` provides shell aliases (`opencode`, `oc`, `ocs`,
+`ocud`, `ocd`, `ocdel`, `ocl`, ..., `ocg`) wrapping the launcher. It also defines
+`opencode:update` (alias `ocud`), which pulls the base image and rebuilds the
 local image layered on top of it. Link it as an oh-my-zsh custom plugin:
 
 ```sh
@@ -263,7 +266,7 @@ default pointing at the conventional location under your home directory
 | `OPENCODE_IMAGE_URL`       | `devsnowdon/opencode-docker:duck` | – (build arg: base image for the `opencode` service) |
 | `OPENCODE_IMAGE_URL_TUI`   | `devsnowdon/opencode-docker:empty` | – (image for the `tui` service) |
 | `WORKSPACE`                | `$SD_OPENCODE` (repo root)       | `/workspace`                        |
-| `OPENCODE_NETWORK`         | –                                | – (external network, see `compose-net/docker-compose.network.yml`) |
+| `OPENCODE_NETWORK`         | –                                | – (external network, see `compose/net/docker-compose.network.yml`) |
 | `OPENCODE_CACHE_DIR`       | `$HOME/.cache/opencode/cache`    | `/home/other/.cache/opencode/cache` |
 | `OPENCODE_DATA_DIR`        | `$HOME/.local/share/opencode`    | `/home/other/.local/share/opencode` |
 | `OPENCODE_CONFIG_DIR`      | `$HOME/.config/opencode`         | `/home/other/.config/opencode`      |
@@ -282,10 +285,10 @@ The toolchain cache mounts (`OPENCODE_PIP_CACHE_DIR`, `OPENCODE_NPM_CACHE_DIR`,
 `OPENCODE_GO_BUILD_CACHE_DIR`, `OPENCODE_GO_MOD_CACHE_DIR`,
 `OPENCODE_CARGO_REGISTRY_DIR`, `OPENCODE_CARGO_GIT_DIR`,
 `OPENCODE_SCCACHE_DIR`) are **not** mounted by default. They are defined in the
-dedicated override files `compose-vol/docker-compose.python.yml`,
-`compose-vol/docker-compose.node.yml`, `compose-vol/docker-compose.go.yml`,
-`compose-vol/docker-compose.rust.yml` (and the combined
-`compose-vol/docker-compose.cache.yml`), which the launcher only merges in when
+dedicated override files `compose/vol/docker-compose.python.yml`,
+`compose/vol/docker-compose.node.yml`, `compose/vol/docker-compose.go.yml`,
+`compose/vol/docker-compose.rust.yml` (and the combined
+`compose/vol/docker-compose.cache.yml`), which the launcher only merges in when
 `OPENCODE_CACHE` is set — see below. This is a deliberate, security-first
 breaking change: toolchain caches hold executable artifacts that get run inside
 the container, so they are no longer mounted unconditionally. Opt into exactly
@@ -301,6 +304,7 @@ These variables are read by `scripts/launcher.sh` from the shell environment
 | `OPENCODE_CONTEXT`         | `.`                        | Docker build context directory passed to the compose `build` section          |
 | `OPENCODE_DOCKERFILE`      | `Dockerfile`               | Dockerfile path (relative to the context) passed to the compose `build` section |
 | `OPENCODE_COMPOSE`         | –                          | Space-separated extra `docker compose` files, merged into the project via `-f` |
+| `OPENCODE_WORKSPACE`       | –                          | The current opencode workspace context; launches targeting a directory outside it prompt before using its environment |
 | `OPENCODE_CACHE`           | –                          | Toolchain cache mounts to enable: `false` (default) none, `all` every cache, or space-separated ids (`go`, `node`, `python`, `rust`) |
 | `OPENCODE_BACKEND_ORIGIN`  | resolved from `compose port` | Backend URL used for the health check and TUI attach |
 | `OPENCODE_CPUSET`          | –                          | CPU pinning (e.g. `2-3`); unset by default (Docker uses all CPUs) |
@@ -318,7 +322,10 @@ Details:
     context directory and Dockerfile path used by the compose `build` section.
     Defaults to `.` (project root) and `Dockerfile` respectively. For example,
     `OPENCODE_CONTEXT=~/my-custom-build OPENCODE_DOCKERFILE=Dockerfile.dev opencode`
-    builds from a custom location. This replaces the old convention of always
+    builds from a custom location. When `OPENCODE_DOCKERFILE` points at a
+    directory (a project folder) and `OPENCODE_CONTEXT` is unset, the launcher
+    derives the build context from it, so the container can be built from the
+    project workspace itself. This replaces the old convention of always
     requiring a `Dockerfile` in the project root.
 - `OPENCODE_COMPOSE` — each entry must be a regular file with a `.yml` or
     `.yaml` extension; anything else aborts the launcher. The files are passed
@@ -327,13 +334,13 @@ Details:
 - `OPENCODE_CACHE` — controls which host toolchain cache directories are
     mounted into the container. Unset or `false` mounts none (the security-first
     default). `all` mounts every toolchain cache via
-    `compose-vol/docker-compose.cache.yml`.
+    `compose/vol/docker-compose.cache.yml`.
     A space-separated list of case-insensitive ids mounts only those, each
     defined in a dedicated override file: `python`
-    (`compose-vol/docker-compose.python.yml`,
-    pip cache), `node` (`compose-vol/docker-compose.node.yml`, npm cache), `go`
-    (`compose-vol/docker-compose.go.yml`, go build + module cache), `rust`
-    (`compose-vol/docker-compose.rust.yml`, cargo registry + git + sccache). Any unknown id
+    (`compose/vol/docker-compose.python.yml`,
+    pip cache), `node` (`compose/vol/docker-compose.node.yml`, npm cache), `go`
+    (`compose/vol/docker-compose.go.yml`, go build + module cache), `rust`
+    (`compose/vol/docker-compose.rust.yml`, cargo registry + git + sccache). Any unknown id
     aborts the launcher. This is a breaking change: the toolchain caches used to
     be mounted by default and are now opt-in, because cached toolchain artifacts
     are executed inside the container. Example:
@@ -348,13 +355,20 @@ Details:
     the `opencode` service. Both default to unset, which leaves Docker's
     defaults (no pinning, no quota). `OPENCODE_CPUSET` pins the container to
     specific host CPUs (e.g. `2-3`); `OPENCODE_CPUS` caps the CPU quota (e.g.
-    `2`). When either is set the launcher generates a temporary compose override
-    file that applies it to the service; unset values are simply omitted.
+    `2`). When either is set the launcher merges a dedicated static override
+    file that applies it to the service (`compose/sys/docker-compose.cpuset.yml`
+    or `compose/sys/docker-compose.cpus.yml`); unset values are simply omitted,
+    matching its default.
 - `SD_YOLO` / `SD_YOLO_HOME` — without these the launcher requires the
     workspace to be a subdirectory of `$HOME` (or of `SD_REPO_HOME` when
     `SD_YOLO_HOME` is `true`) and prompts for confirmation otherwise. `SD_YOLO`
     disables that check entirely. If you like extra security, this is a good
     option to set.
+- `OPENCODE_WORKSPACE` — when exported (e.g. running from within an opencode
+    context), the launcher treats it as the current workspace and prompts before
+    launching a command that would run an unrelated workspace with that
+    workspace's environment. The prompt is skipped when the target directory is
+    `OPENCODE_WORKSPACE` itself or a subdirectory of it.
 - `SD_READ_ONLY` — by default the launcher finds every `.git` directory inside
     the workspace and mounts it read-only (`:ro`) via a generated compose
     override file, so opencode can read git state but not corrupt it. Setting
@@ -468,6 +482,11 @@ The function is valid in a zsh shell:
 
 ```shell
 gist() {
+    if (( $# == 0 )); then
+        echo "No arguments, requires [path] (task)"
+        echo "Task can also be via standard in"
+    fi
+
     local name=$1
     shift
 
@@ -488,7 +507,7 @@ gist() {
     fi
 
     mkdir "$tmp_path"
-    cd "$tmp_path" || exit 1
+    cd "$tmp_path" || return 1
 
     if which git > /dev/null; then
         git init
@@ -498,10 +517,7 @@ gist() {
     fi
 
     # start fresh environment to prevent reusing a projects defaults
-    env -i HOME="$HOME" zsh -ic '
-    opencode:scaffold ./ "$@"
-    ' zsh "$@"
-    }
+    env -i ZDOTDIR="$ZDOTDIR" zsh -ic 'opencode:scaffold ./ "$@"' zsh "$@"
 }
 ```
 

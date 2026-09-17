@@ -9,7 +9,8 @@ LABEL_ONE_OFF="com.docker.compose.oneoff"
 
 LABEL_MANAGED_OPENCODE="dev.snowdon.opencode.managed"
 LABEL_WORKSPACE_OPENCODE="dev.snowdon.opencode.workspace"
-#LABEL_DEV_CONTAINER="dev.snowdon.image.opencode.devcontainer"
+LABEL_DEV_CONTAINER="dev.snowdon.image.opencode.devcontainer"
+LABEL_DEV_CONTAINER_VERSION="dev.snowdon.image.opencode.version"
 LABEL_IMAGE_WORKSPACE="dev.snowdon.opencode.workspace"
 LABEL_NETWORK_MANAGED="dev.snowdon.opencode.managed"
 LABEL_NETWORK_WORKSPACE="dev.snowdon.opencode.workspace"
@@ -18,22 +19,29 @@ LABEL_PARENT_OPENCODE="dev.snowdon.opencode.parent"
 
 LOOPBACK="127.0.0.1"
 
-COMPOSE_NET_DIR="$SD_OPENCODE/compose-net"
-COMPOSE_VOL_DIR="$SD_OPENCODE/compose-vol"
+COMPOSE_NET_DIR="$SD_OPENCODE/compose/net"
+COMPOSE_VOL_DIR="$SD_OPENCODE/compose/vol"
+COMPOSE_SYS_DIR="$SD_OPENCODE/compose/sys"
 
 DOCKER_ARGS="${DOCKER_ARGS:-}"
 SD_YOLO_HOME="${SD_YOLO_HOME:-false}"
+SD_YOLO="${SD_YOLO:-false}"
 
-OPENCODE_COMPOSE=""
+OPENCODE_COMPOSE="${OPENCODE_COMPOSE:-}"
 OPENCODE_CPUSET="${OPENCODE_CPUSET:-}"
 OPENCODE_CPUS="${OPENCODE_CPUS:-}"
 
 IMAGE_URL="${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker:latest}"
-OPENCODE_CONTEXT="${OPENCODE_CONTEXT:-.}"
-OPENCODE_DOCKERFILE="${OPENCODE_DOCKERFILE:-Dockerfile}"
 
-# Range for managed docker networks: an explicit CIDR ("172.20.0.0/16"), or a
-# bare prefix whose mask is implied at 8 bits per octet ("172.20" -> /16).
+if [[ -d "${OPENCODE_DOCKERFILE:-}" ]] && [[ -z "${OPENCODE_CONTEXT:-}" ]]; then
+    OPENCODE_CONTEXT="$(basename "$OPENCODE_DOCKERFILE")"
+    export OPENCODE_CONTEXT
+fi
+OPENCODE_DOCKERFILE="${OPENCODE_DOCKERFILE:-Dockerfile}"
+OPENCODE_CONTEXT="${OPENCODE_CONTEXT:-.}"
+
+# Range for managed docker networks: an explicit CIDR `("172.20.0.0/16")`, or a
+# bare prefix whose mask is implied at 8 bits per octet `("172.20" -> /16)`.
 NETWORK_RANGE="${OPENCODE_NET_RANGE:-172.20.0.0/16}"
 # Mask of each network created inside the range (a /16 range slices into 256 /24s).
 NET_SUBNET_MASK="${OPENCODE_NET_SUBNET:-29}"
@@ -53,7 +61,6 @@ BACKEND_ORIGIN=""
 tmp_compose_dir=""
 tmp_compose_file=""
 tmp_labels_file=""
-tmp_cpu_file=""
 
 network_name=""
 
@@ -162,7 +169,6 @@ docker_network_subnets() {
 docker_network_name() { docker_exec network inspect "$1" --format '{{.Name}}'; }
 docker_network_create() {
     local name="$1" subnet="$2" workspace="$3"
-    echo "name: $1, subnet: $subnet, workspace: $3"
     docker_exec network create \
         --driver bridge \
         --subnet="$subnet" \
@@ -176,6 +182,7 @@ docker_container_inspect() { docker_exec inspect "$@"; }
 docker_container_rm() { docker_exec rm "$@"; }
 docker_container_kill() { docker_exec kill "$@"; }
 docker_container_stop() { docker_exec stop "$@"; }
+docker_container_exec() { docker_exec exec "$@"; }
 docker_image_ls() { docker_exec image ls "$@"; }
 docker_image_rm() { docker_exec image rm "$@"; }
 docker_image_inspect() { docker_exec image inspect "$@"; }
@@ -197,6 +204,7 @@ podman_container_inspect() { _podman_stub container_inspect; }
 podman_container_rm() { _podman_stub container_rm; }
 podman_container_kill() { _podman_stub container_kill; }
 podman_container_stop() { _podman_stub container_stop; }
+podman_container_exec() { _podman_stub container_exec; }
 podman_image_ls() { _podman_stub image_ls; }
 podman_image_rm() { _podman_stub image_rm; }
 podman_image_inspect() { _podman_stub image_inspect; }
@@ -256,13 +264,20 @@ int_to_ip4() {
 }
 
 find_free_network() {
+    if [[ ! "$NET_SUBNET_MASK" =~ ^[0-9]{1,2}$ ]] ||
+        ((NET_SUBNET_MASK < 1 || NET_SUBNET_MASK > 29)); then
+        echo "error: OPENCODE_NET_SUBNET must be between /1 and /29" >&2
+        return 1
+    fi
+
     if ! _net_parse; then
         return 1
     fi
 
-    if [[ ! "$NET_SUBNET_MASK" =~ ^[0-9]{1,2}$ ]] ||
-        ((NET_SUBNET_MASK < 1 || NET_SUBNET_MASK > 29)); then
-        echo "error: OPENCODE_NET_SUBNET must be between /1 and /29" >&2
+    # A subnet mask smaller than the range mask allocates a subnet wider than
+    # the containing range, which overlaps every slice of it; reject that.
+    if ((NET_SUBNET_MASK < net_mask)); then
+        echo "error: OPENCODE_NET_SUBNET (/$NET_SUBNET_MASK) must not be smaller than the network range mask (/$net_mask)" >&2
         return 1
     fi
 
@@ -274,18 +289,11 @@ find_free_network() {
     # number, we'd likely need to load them all anyway.
     local -A used_networks
     local -a networks
-    mapfile -t networks < <(_driver network_ls -q)
+    mapfile -t networks < <(_driver network_ls -q --filter "label=$LABEL_NETWORK_MANAGED=true")
     while IFS= read -r subnet; do
         [[ -z "$subnet" ]] && continue
         used_networks["$subnet"]=1
     done < <(_driver network_subnets "${networks[@]}")
-
-    # A subnet mask smaller than the range mask allocates a subnet wider than
-    # the containing range, which overlaps every slice of it; reject that.
-    if ((NET_SUBNET_MASK < net_mask)); then
-        echo "error: OPENCODE_NET_SUBNET (/$NET_SUBNET_MASK) must not be smaller than the network range mask (/$net_mask)" >&2
-        return 1
-    fi
 
     # Slice the range into fixed-size subnets. When subnets are smaller than
     # the range the index selects the slice bits (e.g. a /16 range slices into
@@ -453,72 +461,88 @@ _sanitize_network_name() {
     printf '%s\n' "$name"
 }
 
-tmp_validated=""
-_assert_maybe_check_outside_root() {
-    local ws_out home ws_out_normalized valid_subdir answer root
+_check_valid_within_root() {
+    local ws_out home ws_out_normalized valid_subdir answer root home
     ws_out="$1"
+    home="$2"
 
-    if [[ ! ${SD_YOLO:-} =~ ^[Tt][Rr][Uu][Ee]$ ]]; then
-        # Previously approved dirs become additional home roots: a path at or
-        # below one later passes without prompting again. This prevents repeated
-        # checks for the same project (e.g. workspace and its worktree parent).
+    # if param three is set, use it as storage of validation, otherwise discard
+    local validated=""
+    if [[ -n ${3+x} ]]; then
+        local -n validated="$3"
+    fi
 
-        # Remove trailing slashes, while preserving "/".
-        if [[ "$SD_YOLO_HOME" == "true" ]]; then
-            # TODO: can be multiple pahts
-            home="$SD_REPO_HOME"
-        else
-            home="$HOME"
-        fi
-        while [[ $home != "/" && $home == */ ]]; do
-            home=${home%/}
-        done
+    ws_out_normalized=$ws_out
+    while [[ $ws_out_normalized != "/" && $ws_out_normalized == */ ]]; do
+        ws_out_normalized=${ws_out_normalized%/}
+    done
 
-        ws_out_normalized=$ws_out
-        while [[ $ws_out_normalized != "/" && $ws_out_normalized == */ ]]; do
-            ws_out_normalized=${ws_out_normalized%/}
-        done
+    valid_subdir=0
 
-        valid_subdir=0
-
-        if [[ $home == "/" ]]; then
-            # Any non-root absolute path is a subdirectory of "/".
-            if [[ $ws_out_normalized != "/" &&
-                $ws_out_normalized == /* ]]; then
-                valid_subdir=1
-            fi
-        elif [[ $ws_out_normalized == "$home"/* ]]; then
-            # The "$home/*" pattern excludes "$home" itself.
+    if [[ $home == "/" ]]; then
+        # Any non-root absolute path is a subdirectory of "/".
+        if [[ $ws_out_normalized != "/" &&
+            $ws_out_normalized == /* ]]; then
             valid_subdir=1
         fi
+    elif [[ $ws_out_normalized == "$home"/* ]]; then
+        # The "$home/*" pattern excludes "$home" itself.
+        valid_subdir=1
+    fi
 
-        # A previously validated dir is also a home: anything at or below it
-        # passes without prompting.
-        if ((!valid_subdir)) && [[ -n "$tmp_validated" ]]; then
-            while IFS= read -r root; do
-                [[ -n "$root" ]] || continue
-                if [[ $ws_out_normalized == "$root" || $ws_out_normalized == "$root"/* ]]; then
-                    valid_subdir=1
-                    break
-                fi
-            done <<<"$tmp_validated"
-        fi
+    # A previously validated dir is also a home: anything at or below it
+    # passes without prompting.
+    if ((!valid_subdir)) && [[ -n "$validated" ]]; then
+        while IFS= read -r root; do
+            [[ -n "$root" ]] || continue
+            if [[ $ws_out_normalized == "$root" || $ws_out_normalized == "$root"/* ]]; then
+                valid_subdir=1
+                break
+            fi
+        done <<<"$validated"
+    fi
 
-        if ((!valid_subdir)); then
-            printf 'Output directory is outside a subdirectory of HOME:\n  %s\n' "$ws_out"
-            read -r -p "Continue anyway? [y/N] " answer </dev/tty || true
+    if ((!valid_subdir)); then
+        return 1
+    else
+        return 0
+    fi
+}
 
-            case ${answer,,} in
-            y | yes)
-                # Remember the approved dir as a new home root for later checks.
-                tmp_validated+="$ws_out_normalized"$'\n'
-                ;;
-            *)
-                printf 'Aborted.\n' >&2
-                exit 1
-                ;;
-            esac
-        fi
+tmp_validated=""
+_assert_maybe_check_outside_root() {
+    if [[ "${SD_YOLO,,}" == "true" ]]; then
+        return
+    fi
+    # Previously approved dirs become additional home roots: a path at or
+    # below one later passes without prompting again. This prevents repeated
+    # checks for the same project (e.g. workspace and its worktree parent).
+    # Remove trailing slashes, while preserving "/".
+    if [[ "${SD_YOLO_HOME,,}" == "true" ]]; then
+        # TODO: can be multiple parts
+        home="$SD_REPO_HOME"
+    else
+        home="$HOME"
+    fi
+    while [[ $home != "/" && $home == */ ]]; do
+        home=${home%/}
+    done
+
+    local answer=""
+    if ! _check_valid_within_root "$1" "$home" tmp_validated; then
+        printf 'Output directory is outside a subdirectory of HOME:\n  %s\n' "$ws_out"
+        read -r -p "Continue anyway? [y/N] " answer </dev/tty || true
+
+        case ${answer,,} in
+        y | yes)
+            # Remember the approved dir as a new home root for later checks.
+            tmp_validated+="$ws_out_normalized"$'\n'
+            ;;
+        *)
+            printf 'Aborted.\n' >&2
+            exit 1
+            ;;
+        esac
     fi
 }
 
@@ -589,25 +613,6 @@ _write_labels_override() {
     } >"$tmp_labels_file"
 }
 
-# Only non-empty values are added; empty values leave the corresponding
-# Compose setting at its default.
-_write_cpu_override() {
-    if [[ -z "$tmp_compose_dir" ]]; then
-        tmp_compose_dir="$(mktemp -d)"
-    fi
-    tmp_cpu_file="$tmp_compose_dir/docker-compose.cpu.yml"
-    {
-        printf '%s\n' 'services:'
-        printf '%s\n' '  opencode:'
-        if [[ -n "$OPENCODE_CPUSET" ]]; then
-            printf '    cpuset: %s\n' "$OPENCODE_CPUSET"
-        fi
-        if [[ -n "$OPENCODE_CPUS" ]]; then
-            printf '    cpus: %s\n' "$OPENCODE_CPUS"
-        fi
-    } >"$tmp_cpu_file"
-}
-
 # Prepares the Docker Compose arguments. This function sets up the project
 # configuration including network settings and git directory mounts.
 _opencode_args_prepare() {
@@ -632,16 +637,17 @@ _opencode_args_prepare() {
     # TODO: Support `--worktree <branch>` / `--wt <branch>` to create or reuse
     # a worktree at:
     # $HOME/.local/state/repo/<branch>
-    local parent parent_workspace
+    local has_parent parent_workspace
     local -a children
-    parent="$(_git_worktree_parent "$ws_out/.git")"
+    has_parent="$(_git_worktree_parent "$ws_out/.git")"
 
-    # TODO; if SD_REQUIRE_WORKTREE is set, ensure that a worktree is initilised
-    # or initilise it. Also disable this ability because. Or at least warn
-    # Do you want to load the worktree?
-    if [[ -z "$parent" ]] && command -v git >/dev/null 2>&1; then
+    if [[ -z "$has_parent" ]] && command -v git >/dev/null 2>&1; then
         # for parent, find worktree child and use its path as effetive
-        mapfile -t children < <(_find_docker_managed --stopped --parent "$ws_out")
+        # TODO: could search only up containers
+        #   which would enable multiple active worktrees
+        #   at least take precedent from up containers
+        #   However, it would mean that the behaviour is unpredictable
+        mapfile -t children < <(_select_managed_containers --stopped --parent "$ws_out")
         if ((${#children[@]} > 1)); then
             echo "Incorrect (${children[*]}) number of children containers for this workspace."
             exit 1
@@ -655,16 +661,14 @@ _opencode_args_prepare() {
             # indicating that the worktree branch contains the current branch
             # plus additional commits.
             #
-            local child_worktree="${children[0]}" eff_path
-            # this is the effective worktree, get the path info
-            read -r eff_path eff_proj < <(
-                _driver container_inspect \
-                    --format '{{index .Config.Labels "'"$LABEL_IMAGE_WORKSPACE"'"}} {{index .Config.Labels "'"$LABEL_CONTAINER_PROJECT_NAME"'"}}' \
-                    "$child_worktree"
-            ) || {
+            local child_worktree="${children[0]}" eff_path eff_proj rec
+            # this is the effective worktree, get the path info. _container_info
+            # fields are id, status, workspace (eff_path), project (eff_proj), ...
+            rec="$(_container_info "$child_worktree")" || {
                 echo "Failed to inspect worktree container $child_worktree" >&2
                 exit 1
             }
+            IFS=$'\t' read -r _ _ eff_path eff_proj _ _ _ _ <<<"$rec"
 
             parent_workspace="$ws_out"
 
@@ -693,14 +697,19 @@ _opencode_args_prepare() {
                 is_clean=1
             fi
 
+            # TODO and if parent is clean?
             if ((is_same_commit || is_parent_merge_base)); then
                 ws_out="$eff_path"
                 PROJECT_NAME="$eff_proj"
+                has_parent="$parent_workspace/.git"
             elif ((is_clean)); then
                 # all changes must be commited, there is no child containers,
                 # we can do what we want
                 # but the branch is different, needs syncing - so what to do
                 #echo "Reseting worktree branch to parent branch: $branch"
+
+                # TODO: if parent is ahead, git -C "$eff_path" rebase $parent_branch
+
                 #git -C "$eff_path" reset --hard "$branch"
                 #git -C "$eff_path" clean -df
                 #ws_out="$eff_path"
@@ -717,6 +726,26 @@ _opencode_args_prepare() {
         fi
     fi
 
+    # Assert the effective workspace is the profile workspace
+    if [[ -n ${OPENCODE_WORKSPACE+x} ]] && [[ "$OPENCODE_WORKSPACE" != "$ws_out" ]]; then
+        # running in a opencode space that is not the current
+        if ! _check_valid_within_root "$ws_out" "$OPENCODE_WORKSPACE"; then
+            # not within this opencode project
+            local answer=""
+            printf 'Output directory is outside of the current workspace:\n  %s\n' "$ws_out"
+            printf 'Running this command will run with this workspaces environment\n'
+            read -r -p "Continue anyway? [y/N] " answer </dev/tty || true
+
+            case ${answer,,} in
+            y | yes) ;;
+            *)
+                printf 'Aborted.\n' >&2
+                exit 1
+                ;;
+            esac
+        fi
+    fi
+
     # Build Docker Compose arguments starting with the main compose file
     # after resolving any worktree args
     args_out+=(
@@ -724,10 +753,10 @@ _opencode_args_prepare() {
         -f "$compose_dir/docker-compose.yml"
     )
 
-    # parent worktrees need labels, after the main compose name
-    if [[ -n "$parent" ]]; then
+    # children worktrees need labels, after the main compose name
+    if [[ -n "$has_parent" ]]; then
         # for worktrees, include worktree parent label
-        _write_labels_override "$parent"
+        _write_labels_override "$has_parent"
         args_out+=(-f "$tmp_labels_file")
     fi
 
@@ -808,10 +837,10 @@ _opencode_args_prepare() {
         # A worktree's .git is a file whose gitdir pointer lives in the parent
         # repository. Mount the parent git dir read-only at its own host path so
         # the pointer resolves inside the container too.
-        if [[ -n "$parent" ]]; then
-            _assert_maybe_check_outside_root "$parent"
-            git_mounts+=("$parent:$parent")
-            echo "read-only locking worktree parent: $parent"
+        if [[ -n "$has_parent" ]]; then
+            _assert_maybe_check_outside_root "$has_parent"
+            git_mounts+=("$has_parent:$has_parent")
+            echo "read-only locking worktree parent: $has_parent"
         fi
 
         if ((${#git_mounts[@]} > 0)); then
@@ -820,17 +849,20 @@ _opencode_args_prepare() {
         fi
     fi
 
-    if [[ -n "$OPENCODE_CPUSET" || -n "$OPENCODE_CPUS" ]]; then
-        _write_cpu_override
-        args_out+=(-f "$tmp_cpu_file")
-
-        # Display CPU resource allocation if configured
-        if [ -n "$OPENCODE_CPUSET" ]; then
-            echo "Using CPUSET: $OPENCODE_CPUSET"
-        fi
-        if [ -n "$OPENCODE_CPUS" ]; then
-            echo "Using CPUS: $OPENCODE_CPUS"
-        fi
+    # Only non-empty values are added; empty values leave the corresponding
+    # Compose setting at its default. Each option is its own static override
+    # file, merged in only when set.
+    if [[ -n "$OPENCODE_CPUSET" ]]; then
+        local cpu_file="$COMPOSE_SYS_DIR/docker-compose.cpuset.yml"
+        _assert_file_is_yml "$cpu_file" || exit 1
+        args_out+=(-f "$cpu_file")
+        echo "Using CPUSET: $OPENCODE_CPUSET"
+    fi
+    if [[ -n "$OPENCODE_CPUS" ]]; then
+        local cpu_file="$COMPOSE_SYS_DIR/docker-compose.cpus.yml"
+        _assert_file_is_yml "$cpu_file" || exit 1
+        args_out+=(-f "$cpu_file")
+        echo "Using CPUS: $OPENCODE_CPUS"
     fi
 
 }
@@ -958,20 +990,26 @@ _backend_healthy() {
         "$BACKEND_HEALTH_URL" >/dev/null 2>&1
 }
 
-# List managed containers. By default oneoff (throwaway `compose run`) containers
-# are skipped; pass --all to include them. An optional workspace argument scopes
-# the results to containers labelled for that workspace; pass --parent <path> to
-# scope by the worktree-parent label instead (containers launched from worktrees
-# of <path>).
-_find_docker_managed() {
-    local include_oneoff=0
-    local ws_filter parent_filter stopped=""
+# Print the raw ids of the managed opencode containers selected by the given
+# label filters, one per line (nothing when the selection is empty).
+#
+# `--stopped` adds `-a` so stopped (still existing) containers are found; without
+# it only running containers are listed. The optional positional workspace
+# argument and `--parent <ws>` turn into docker label filters:
+#     label=dev.snowdon.opencode.workspace=<ws>   (positional workspace)
+#     label=dev.snowdon.opencode.parent=<ws>      (--parent, worktree child)
+# Docker --filter clauses are AND-ed, so a positional workspace and a --parent
+# argument are mutually exclusive selectors: using both always returns nothing
+# because a container never carries both labels.
+#
+# Engine errors are not swallowed: stdout and stderr go to separate temp files so
+# a failing `docker ps` still reports `warning: container discovery failed:
+# <stderr>` while yielding whatever (possibly empty) ids did come through. Both
+# temp files are removed on every path.
+_managed_container_ids() {
+    local ws_filter="" parent_filter="" stopped=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-        --all)
-            include_oneoff=1
-            shift
-            ;;
         --stopped)
             stopped="-a"
             shift
@@ -990,10 +1028,7 @@ _find_docker_managed() {
             ;;
         esac
     done
-    local id rec oneoff istui
-    local ids_file ps_rc ps_err
-    # Discover the managed containers, keeping stderr separate: an engine
-    # failure must be reported, not silently swallowed as an empty listing.
+    local id ids_file ps_rc ps_err
     ps_err="$(mktemp "${TMPDIR:-/tmp}/oc-pserr.XXXXXX")" || return 1
     ids_file="$(mktemp "${TMPDIR:-/tmp}/oc-ps.XXXXXX")" || {
         rm -f -- "$ps_err"
@@ -1011,29 +1046,129 @@ _find_docker_managed() {
     rm -f -- "$ps_err"
 
     while read -r id; do
-        if [ "$include_oneoff" -eq 0 ]; then
-            rec="$(
-                _driver container_inspect \
-                    --format '{{index .Config.Labels "'"$LABEL_ONE_OFF"'"}}{{"\t"}}{{index .Config.Labels "'"$LABEL_TUI_OPENCODE"'"}}{{"\t"}}.' \
-                    "$id" 2>/dev/null
-            )" || rec=""
-            # docker compose sets com.docker.compose.oneoff to "True" (capital T)
-            # for one-off `compose run` containers; compare case-insensitively.
-            IFS=$'\t' read -r oneoff istui _ <<<"$rec"
-            if [[ "${oneoff,,}" == "true" ]] && [[ "${istui,,}" != "true" ]]; then
-                continue
-            fi
-        fi
         printf '%s\n' "$id"
     done <"$ids_file"
     rm -f -- "$ids_file"
 }
 
+# Print one tab-separated record describing the given managed container id:
+#
+#     <id>\t<status>\t<workspace>\t<project>\t<oneoff>\t<tui>\t<parent>\t.
+#
+# Empty label columns are left blank; the trailing '.' sentinel keeps them from
+# being dropped by the `read -a` split used by callers. Fields are separated with
+# {{"\t"}} (a Go template string literal), not a raw \t: docker inspect does not
+# interpolate \t escapes the way docker ps does.
+#
+# docker inspect is used rather than `docker ps --format` because .Config.Labels
+# from inspect is always a map, while the .Labels from `ps --format` can surface
+# as a slice (indexing a slice by string then fails) depending on the
+# docker/compose build.
+#
+# Returns non-zero (printing nothing) for a non-existent/stale id.
+_container_info() {
+    _driver container_inspect \
+        --format '{{.ID}}{{"\t"}}{{.State.Status}}{{"\t"}}{{index .Config.Labels "'"$LABEL_WORKSPACE_OPENCODE"'"}}{{"\t"}}{{index .Config.Labels "'"$LABEL_CONTAINER_PROJECT_NAME"'"}}{{"\t"}}{{index .Config.Labels "'"$LABEL_ONE_OFF"'"}}{{"\t"}}{{index .Config.Labels "'"$LABEL_TUI_OPENCODE"'"}}{{"\t"}}{{index .Config.Labels "'"$LABEL_PARENT_OPENCODE"'"}}{{"\t"}}.' \
+        "$1" 2>/dev/null
+}
+
+# Print the ids of the managed opencode containers selected by the flags, one per
+# line (nothing when the selection is empty). This is the shared discovery policy
+# behind list/stop/delete (and the worktree-child probe in
+# _opencode_args_prepare).
+#
+# Selection runs in two steps:
+#
+#   1. _managed_container_ids narrows by docker label filters.
+#
+#   2. Each discovered id is inspected (via _container_info) when a policy needs
+#      per-container labels:
+#        * unless --all, throwaway `compose run` oneoffs are dropped while the
+#          interactive TUI one-off is kept. A container is excluded only when it
+#          is a oneoff (label com.docker.compose.oneoff, compared
+#          case-insensitively because compose sets "True") that is not the tui
+#          service (dev.snowdon.opencode.tui).
+#        * --other <ws> drops containers belonging to <ws> (workspace label) and
+#          containers launched from its worktrees (parent label). Docker filters
+#          cannot express `label != x`, so this also needs the per-id inspect.
+#
+#   Flags:
+#     -a, --all       Include oneoff (`compose run`) containers (skips the
+#                     per-id oneoff filter).
+#     --stopped       Also include stopped containers (`docker ps -a`). Used by
+#                     list/delete so they can see containers that are not running.
+#     --parent <ws>   Select containers labelled dev.snowdon.opencode.parent=<ws>
+#                     (containers launched from git worktrees of <ws>).
+#     --other <ws>    Exclude containers belonging to <ws> and its worktrees.
+#     <workspace>     Positional: select containers labelled
+#                     dev.snowdon.opencode.workspace=<ws>.
+_select_managed_containers() {
+    local include_oneoff=0 other_ws=""
+    local ws_filter="" parent_filter="" stopped=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        -a | --all)
+            include_oneoff=1
+            shift
+            ;;
+        --stopped)
+            stopped="-a"
+            shift
+            ;;
+        --other)
+            other_ws="$2"
+            shift 2
+            ;;
+        --other=*)
+            other_ws="${1#--other=}"
+            shift
+            ;;
+        --parent)
+            parent_filter="$2"
+            shift 2
+            ;;
+        --parent=*)
+            parent_filter="${1#--parent=}"
+            shift
+            ;;
+        *)
+            ws_filter="$1"
+            shift
+            ;;
+        esac
+    done
+
+    local sel=()
+    if [[ -n "$stopped" ]]; then sel+=(--stopped); fi
+    if [[ -n "$ws_filter" ]]; then sel+=("$ws_filter"); fi
+    if [[ -n "$parent_filter" ]]; then sel+=(--parent "$parent_filter"); fi
+
+    local id rec ws parent oneoff istui
+    while read -r id; do
+        [[ -z "$id" ]] && continue
+        if [[ "$include_oneoff" -eq 0 || -n "$other_ws" ]]; then
+            rec="$(_container_info "$id")" || rec=""
+            IFS=$'\t' read -r _ _ ws _ oneoff istui parent _ <<<"$rec"
+            if [[ "$include_oneoff" -eq 0 ]] &&
+                [[ "${oneoff,,}" == "true" ]] && [[ "${istui,,}" != "true" ]]; then
+                continue
+            fi
+            if [[ -n "$other_ws" ]] &&
+                [[ "$ws" == "$other_ws" || "$parent" == "$other_ws" ]]; then
+                continue
+            fi
+        fi
+        printf '%s\n' "$id"
+    done < <(_managed_container_ids "${sel[@]}")
+}
+
+# Resolve the workspace a managed container was created for: read the
+# dev.snowdon.opencode.workspace label (field 3 of _container_info). Returns
+# empty for a non-existent/stale id or when the label is absent.
 _find_workspace() {
-    local ws
-    ws="$(_driver container_inspect \
-        --format "{{index .Config.Labels \"$LABEL_WORKSPACE_OPENCODE\"}}" \
-        "$1" 2>/dev/null)" || ws=""
+    local rec ws
+    rec="$(_container_info "$1")" || rec=""
+    IFS=$'\t' read -r _ _ ws _ _ _ _ _ <<<"$rec"
     printf '%s\n' "$ws"
 }
 
@@ -1047,7 +1182,6 @@ _run_opencode_executable() {
     else
         # Inside the compose network the service is reachable on its private port.
         local BACKEND_ORIGIN="${OPENCODE_BACKEND_ORIGIN:-http://opencode:4096}"
-        # this need to be able to pass info to healthy, without a port
         _driver compose "${OPENCODE_ARGS[@]}" run \
             --rm --remove-orphans \
             tui \
@@ -1162,7 +1296,7 @@ opencode() {
             other_running=1
             break
         fi
-    done < <(_find_docker_managed)
+    done < <(_select_managed_containers)
 
     if [[ "$other_running" -eq 1 ]]; then
         echo "NOTICE: pre-existing opencode containers are running for other workspaces" >&2
@@ -1373,6 +1507,18 @@ opencode:update() {
 # the workspace, while preserving the workspace configuration.
 opencode:down() {
     echo "Stopping opencode project: $PROJECT_NAME ($WORKSPACE)"
+
+    local all=0 other=0 quiet=0
+    local args=()
+    _opencode_parse_flags all other quiet args "$@"
+
+    # down can only remove the current workspace's project, so "--other" (act on
+    # everything except the current workspace) has no coherent meaning here.
+    if ((other)); then
+        echo "error: --other cannot be combined with down: it only removes the current workspace's project" >&2
+        exit 2
+    fi
+
     # docker compose down does not remove one-off containers created via
     # 'compose run' (like the TUI). Stop any remaining managed containers
     # scoped to this workspace.
@@ -1391,8 +1537,6 @@ opencode:up() {
     _driver compose "${OPENCODE_ARGS[@]}" up -d opencode "$@"
 
     opencode:list "$WORKSPACE"
-
-    # TODO: start the backend?
 }
 
 # Create a new opencode project scaffold with git initialization
@@ -1556,6 +1700,48 @@ opencode:new() {
     opencode "$@"
 }
 
+# Parse the option flags shared by the stop/delete/list/down command family
+# into caller-supplied variables. All four flags are recognised everywhere so
+# the commands behave consistently even if they only act on a subset of them.
+#
+#   _opencode_parse_flags <out_all> <out_other> <out_quiet> <out_args> [args...]
+#
+# Sets (by nameref):
+#   out_all   1 when --all or -a was given, else 0.
+#   out_other 1 when --other or -o was given, else 0.
+#   out_quiet 1 when --quiet or -q was given, else 0.
+#   out_args  The remaining positional arguments, in their original order.
+#
+# shellcheck disable=SC2034  # writes go through the nameref parameters
+_opencode_parse_flags() {
+    local -n out_all="$1"
+    local -n out_other="$2"
+    local -n out_quiet="$3"
+    local -n out_args="$4"
+    shift 4
+    out_all=0
+    out_other=0
+    out_quiet=0
+    out_args=()
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+        --all | -a) out_all=1 ;;
+        --other | -o) out_other=1 ;;
+        --quiet | -q) out_quiet=1 ;;
+        *) out_args+=("$arg") ;;
+        esac
+    done
+}
+
+# Resolve the workspace --other must preserve: the exported WORKSPACE when
+# running inside an opencode context/repl, otherwise the directory the command
+# was invoked from. Commands in the stop/delete/list family dispatch before
+# workspace resolution, so WORKSPACE is not otherwise available to them.
+_opencode_current_workspace() {
+    printf '%s\n' "${WORKSPACE:-$(realpath "$PWD")}"
+}
+
 # Stops the existing managed containers
 # Pass --all to include oneoff (throwaway `compose run`) containers.
 # An optional workspace argument scopes the stop to containers for that
@@ -1563,14 +1749,9 @@ opencode:new() {
 opencode:stop() {
     echo "Stopping existing opencode containers"
 
-    local all=0
+    local all=0 other=0 quiet=0
     local args=()
-    for arg in "$@"; do
-        case "$arg" in
-        --all | -a) all=1 ;;
-        *) args+=("$arg") ;;
-        esac
-    done
+    _opencode_parse_flags all other quiet args "$@"
 
     # First positional argument is the workspace to scope to; empty = all
     # workspaces. A container-id prefix (not an existing directory) is matched
@@ -1597,6 +1778,7 @@ opencode:stop() {
     local find_args=()
     [[ -n "$ws_scope" ]] && find_args+=("$ws_scope")
     ((all)) && find_args+=(--all)
+    ((other)) && find_args+=(--other "$(_opencode_current_workspace)")
 
     local ws_label
     while read -r id; do
@@ -1608,7 +1790,7 @@ opencode:stop() {
             echo "Stopping managed container $id"
         fi
         _driver container_stop "$id" || true
-    done < <(_find_docker_managed "${find_args[@]}")
+    done < <(_select_managed_containers "${find_args[@]}")
 }
 
 # Force-remove all managed opencode containers.
@@ -1618,18 +1800,25 @@ opencode:stop() {
 # Pass --all to include oneoff (throwaway `compose run`) containers.
 # An optional workspace argument scopes the delete to containers for that
 # workspace; by default all workspaces are removed.
+# TODO: delete [cid] then delete --all [cid] does not work
 opencode:delete() {
-    # TODO: --other remove all other than the current workspace,
     # also for stop, down
-    local all=0
+    local all=0 other=0 quiet=0
     local args=()
     local ws_label
-    for arg in "$@"; do
-        case "$arg" in
-        --all | -a) all=1 ;;
-        *) args+=("$arg") ;;
-        esac
-    done
+    _opencode_parse_flags all other quiet args "$@"
+
+    local find_args=(--stopped)
+    ((all)) && find_args+=(--all)
+
+    # --other force-removes everything except the current workspace (and its
+    # worktrees); the current workspace's containers, images, and networks are
+    # preserved.
+    local other_ws=""
+    if ((other)); then
+        other_ws="$(_opencode_current_workspace)"
+        find_args+=(--other "$other_ws")
+    fi
 
     # First positional argument is the workspace to scope to; empty = all
     # workspaces. A container-id prefix (not an existing directory) is matched
@@ -1644,6 +1833,8 @@ opencode:delete() {
         fi
     fi
 
+    # TODO: other and ws_scope may conflict
+
     function _ws_remove() {
         local id="$1"
         local ws_label="$2"
@@ -1656,9 +1847,6 @@ opencode:delete() {
             echo "failed to remove container ($id)"
         }
     }
-
-    local find_args=(--stopped)
-    ((all)) && find_args+=(--all)
 
     # TODO: how does this work with worktrees
 
@@ -1682,10 +1870,38 @@ opencode:delete() {
             [[ -z "$id" ]] && continue
             ws_label="$(_find_workspace "$id")"
             _ws_remove "$id" "$ws_label"
-        done < <(_find_docker_managed "${find_args[@]}")
+        done < <(_select_managed_containers "${find_args[@]}")
     fi
 
     if [ "$all" -eq 1 ]; then
+
+        # Exclude WORKSPACE managed contianer if --other is set
+        local exclude_iid="" exclude_nid=""
+        if ((other)); then
+            local -a exclude
+            # search images
+            mapfile -t exclude < <(
+                _driver image_ls -q --filter "label=$LABEL_IMAGE_WORKSPACE=$other_ws"
+            )
+            if ((${#exclude[@]} > 1)); then
+                echo "Invalid number of images with the workspace ($other_ws)."
+                echo "Aborting, due to invalid state..."
+                exit 1
+            fi
+            exclude_iid="${exclude[0]}"
+
+            # search networks
+            mapfile -t exclude < <(
+                _driver network_ls -q --filter label=$LABEL_NETWORK_WORKSPACE="$other_ws"
+            )
+            if ((${#exclude[@]} > 1)); then
+                echo "Invalid number of containers with the workspace ($other_ws)."
+                echo "Aborting, due to invalid state..."
+                exit 1
+            fi
+            exclude_nid="${exclude[0]}"
+        fi
+
         # remove the images
         local filter_images=(
             --filter "label=$LABEL_IMAGE_WORKSPACE"
@@ -1696,7 +1912,9 @@ opencode:delete() {
         fi
 
         local -a images
-        mapfile -t images < <(_driver image_ls -q "${filter_images[@]}")
+        mapfile -t images < <(
+            _driver image_ls -q "${filter_images[@]}" | grep -vFx "$exclude_iid"
+        )
         if ((${#images[@]})); then
             _driver image_rm "${images[@]}"
         fi
@@ -1711,7 +1929,9 @@ opencode:delete() {
             filters_network+=(--filter "label=$LABEL_NETWORK_WORKSPACE=$ws_scope")
         fi
         local -a networks
-        mapfile -t networks < <(_driver network_ls -q "${filters_network[@]}")
+        mapfile -t networks < <(
+            _driver network_ls -q "${filters_network[@]}" | grep -vFx "$exclude_nid"
+        )
 
         if ((${#networks[@]})); then
             _driver network_rm "${networks[@]}"
@@ -1726,16 +1946,15 @@ opencode:delete() {
 # its git worktrees (parent label match). stop/delete are NOT parent-scoped;
 # they only act on an exact workspace match. Pass --quiet to print only the
 # container ids (one per line), handy for scripting stop/delete.
+#
+# Container status:
+#   on-off  => pgrep opencode           => running, implied by container
+#   tui     => pgrep opencode attach    => running, implied by container
+#   main    => pgrep opencode           => running, no process => idle, ps -a => exited
 opencode:list() {
-    local all=0 quiet=0
+    local all=0 other=0 quiet=0
     local args=()
-    for arg in "$@"; do
-        case "$arg" in
-        --all | -a) all=1 ;;
-        --quiet | -q) quiet=1 ;;
-        *) args+=("$arg") ;;
-        esac
-    done
+    _opencode_parse_flags all other quiet args "$@"
 
     # First positional argument is the workspace to scope to; empty = all
     # workspaces.
@@ -1748,38 +1967,33 @@ opencode:list() {
         fi
     fi
 
-    # Gather one tab-separated record per managed container (id, status,
-    # workspace, project, oneoff, tui). `docker inspect` is used rather than
-    # `docker ps --format`: .Config.Labels is always a map there, while .Labels
-    # from `ps --format` can surface as a slice (indexing a slice by string then
-    # fails) depending on the docker/compose build. Fields are separated with
-    # {{"\t"}} (a Go template string literal), not a raw \t: docker inspect does
-    # not interpolate \t escapes the way docker ps does. A trailing '.' keeps
-    # empty trailing label columns from being dropped by `read -a`.
+    # Gather one _container_info record per managed container; the columns this
+    # command renders are id, status, workspace, project, oneoff, tui (the extra
+    # parent/sentinel fields are ignored here). See _container_info for the
+    # docker inspect rationale.
     local find_args=(--stopped)
     [[ -n "$ws_scope" ]] && find_args+=("$ws_scope")
     ((all)) && find_args+=(--all)
+    ((other)) && find_args+=(--other "$(_opencode_current_workspace)")
 
     # A workspace scope also lists containers launched from its git worktrees:
     # those carry dev.snowdon.opencode.parent=<ws_scope>, so query that label too
     # and merge. Docker --filter clauses are AND-ed and a container never holds
-    # both labels, hence two separate lookups deduped by sort -u.
+    # both labels, hence two separate lookups deduped by sort -u. --other must
+    # also exclude such worktree children of the current workspace.
     local parent_args=(--stopped --parent "$ws_scope")
     ((all)) && parent_args+=(--all)
+    ((other)) && parent_args+=(--other "$(_opencode_current_workspace)")
 
     local -a records=()
     local id rec
     while read -r id; do
         [[ -z "$id" ]] && continue
-        rec="$(
-            _driver container_inspect \
-                --format '{{.ID}}{{"\t"}}{{.State.Status}}{{"\t"}}{{index .Config.Labels "'"$LABEL_WORKSPACE_OPENCODE"'"}}{{"\t"}}{{index .Config.Labels "'"$LABEL_CONTAINER_PROJECT_NAME"'"}}{{"\t"}}{{index .Config.Labels "'"$LABEL_ONE_OFF"'"}}{{"\t"}}{{index .Config.Labels "'"$LABEL_TUI_OPENCODE"'"}}{{"\t"}}.' \
-                "$id" 2>/dev/null
-        )" || rec=""
+        rec="$(_container_info "$id")" || rec=""
         [[ -n "$rec" ]] && records+=("$rec")
     done < <({
-        _find_docker_managed "${find_args[@]}"
-        [[ -n "$ws_scope" ]] && _find_docker_managed "${parent_args[@]}"
+        _select_managed_containers "${find_args[@]}"
+        [[ -n "$ws_scope" ]] && _select_managed_containers "${parent_args[@]}"
     } | sort -u)
 
     if ((${#records[@]} == 0)); then
@@ -1818,6 +2032,14 @@ opencode:list() {
         elif [[ "${istui,,}" == "true" ]]; then
             mode="tui"
         else
+            # Only a running container can be probed for its backend process; a
+            # stopped one keeps its own State.Status (e.g. "exited") untouched.
+            # It is running if it has any opencode process (serve, run, attach,
+            # ...) running in it; report idle otherwise.
+            if [[ "$status" == "running" ]] &&
+                ! _driver container_exec "$id" pgrep -f 'opencode' >/dev/null 2>&1; then
+                status="idle"
+            fi
             mode="main"
         fi
         ids+=("$id")
@@ -2134,31 +2356,38 @@ _opencode_help_cmd() {
         echo "    command...   The setup command (and its args) to run."
         ;;
     down)
-        echo "down"
+        echo "down [workspace]"
         echo "  Remove the project's compose resources (containers, networks, volumes) and"
         echo "  stop any remaining managed containers (e.g. the TUI) for this workspace,"
         echo "  preserving the workspace configuration."
         echo "  Args:"
-        echo "    (none)"
+        echo "    [workspace] Optional path scoping which project is torn down"
+        echo "                (defaults to the current directory)."
+        echo "  '--other'/-o is not accepted here: down only ever removes the current"
+        echo "  workspace's project, so it is refused (exit 2)."
         ;;
     delete)
-        echo "delete <project> [--all]"
+        echo "delete [<project>] [--all] [--other]"
         echo "  Force-remove all managed opencode containers across workspaces using"
         echo "  'docker rm -f'. Immediately removes stuck or unwanted containers."
         echo "  If <project> is not specified, all opencode-docker managed containers"
         echo "  will be removed"
         echo "  Args:"
-        echo "    --all     Also remove oneoff (throwaway 'compose run') containers."
-        echo "    <project> The path to the project"
+        echo "    --all, -a   Also remove oneoff (throwaway 'compose run') containers."
+        echo "    --other, -o Force-remove everything except the current workspace; its"
+        echo "                containers, images, and networks are preserved."
+        echo "    [project]   The path to the project to scope the delete to."
         ;;
-    ls)
-        echo "ls [directory] [--all] [--quiet]"
+    ls | list)
+        echo "ls|list [directory] [--all] [--other] [--quiet]"
         echo "  List the managed opencode containers in a ps-style table (id, status,"
         echo "  workspace, project, mode), including stopped ones. Mode is one of"
         echo "  'tui', 'one off', or 'main'. By default oneoff (throwaway 'compose"
         echo "  run') containers are skipped."
         echo "  Args:"
         echo "    --all, -a   Also list oneoff (throwaway 'compose run') containers."
+        echo "    --other, -o List every managed container except the current workspace's"
+        echo "                (and its worktrees)."
         echo "    --quiet, -q Print only the container ids, one per line."
         echo "    [directory] Only list containers for this workspace. Optional."
         ;;
@@ -2169,13 +2398,15 @@ _opencode_help_cmd() {
         echo "    command...   The command (and its args) to run inside the container."
         ;;
     stop)
-        echo "stop <project> [--all]"
+        echo "stop [<project>] [--all] [--other]"
         echo "  Gracefully stop the managed opencode containers across all workspaces,"
         echo "  freeing their ports. 'down' scopes this to the current workspace."
         echo "  If <project> is specified then only act on that project."
         echo "  Args:"
-        echo "    --all     Also stop oneoff (throwaway 'compose run') containers."
-        echo "    <project> The path to the project"
+        echo "    --all, -a   Also stop oneoff (throwaway 'compose run') containers."
+        echo "    --other, -o Stop every managed container except the current workspace's"
+        echo "                (and its worktrees)."
+        echo "    [project]   The path to the project to scope the stop to."
         ;;
     run)
         echo "run [command...]"
@@ -2302,11 +2533,11 @@ opencode:help() {
     printf '  %-11s %s\n' "up" "Start the container in the background without running a process"
     printf '  %-11s %s\n' "setup" "Run setup commands against the persisted instance"
     printf '  %-11s %s\n' "down" "Remove the project's containers, networks, volumes, and TUI"
-    printf '  %-11s %s\n' "delete" "Force-remove all managed opencode container resources across workspaces (--all for oneoffs)"
-    printf '  %-11s %s\n' "ls" "List managed opencode containers in a ps-style table (--all for oneoffs)"
+    printf '  %-11s %s\n' "delete" "Force-remove all managed opencode container resources across workspaces (--all for oneoffs, --other to spare the current workspace)"
+    printf '  %-11s %s\n' "ls|list" "List managed opencode containers in a ps-style table (--all for oneoffs)"
     printf '  %-11s %s\n' "exec" "Run a command interactively inside the running container"
     printf '  %-11s %s\n' "git" "Run a git command in the workspace on the host"
-    printf '  %-11s %s\n' "stop" "Stop the managed opencode containers across all workspaces (--all for oneoffs + images)"
+    printf '  %-11s %s\n' "stop" "Stop the managed opencode containers across all workspaces (--all for oneoffs)"
     printf '  %-11s %s\n' "run" "Run a one-off non-interactive task in the service"
     printf '  %-11s %s\n' "shell" "Open an interactive shell inside the running container"
     printf '  %-11s %s\n' "repl" "Launch an interactive bash shell bound to the workspace with bare-name commands"
@@ -2322,6 +2553,15 @@ opencode:help() {
     echo "The workspace defaults to the current directory, and SD_OPENCODE points to"
     echo "the compose directory (default: \$HOME/opencode)."
     echo
+    echo "stop, delete, and ls accept --all (-a) to include throwaway one-off"
+    echo "'compose run' containers, and --other (-o) to act on everything except the"
+    echo "current workspace. delete --other also preserves the current workspace's"
+    echo "images and networks."
+    echo
+    echo "Launcher behaviour is configured by OPENCODE_* and SD_* environment"
+    echo "variables (build context, caches, networks, CPU limits, the"
+    echo "OPENCODE_WORKSPACE guard, ...); see the project README for details."
+    echo
     echo "Run '$0 help <command>'   for details on a specific command."
     echo "Run '$0 <command> --help' for details on a specific command."
     echo "Run '$0 <command> -h'     for details on a specific command."
@@ -2333,12 +2573,12 @@ opencode:help() {
 
         opencode_version="$(
             _driver image_inspect "$IMAGE_URL" \
-                --format '{{ index .Config.Labels "dev.snowdon.image.opencode.version" }}'
+                --format "{{ index .Config.Labels \"$LABEL_DEV_CONTAINER_VERSION\" }}"
         )"
 
         devcontainer_version="$(
             _driver image_inspect "$IMAGE_URL" \
-                --format '{{ index .Config.Labels "dev.snowdon.image.opencode.devcontainer" }}'
+                --format "{{ index .Config.Labels \"$LABEL_DEV_CONTAINER\" }}"
         )"
 
         echo "Docker image:       $IMAGE_URL"
@@ -2390,6 +2630,20 @@ main() {
     fi
 
     # Just exit if there is no docker
+    if [[ "$cmd" == "down" ]]; then
+        # down only ever removes the current workspace's project: --other has no
+        # coherent meaning, so refuse it before touching docker at all.
+        local arg
+        for arg in "$@"; do
+            case "$arg" in
+            --other | --other=* | -o)
+                echo "error: --other cannot be combined with down: it only removes the current workspace's project" >&2
+                exit 2
+                ;;
+            esac
+        done
+    fi
+
     if ! _driver info >/dev/null 2>&1; then
         echo "Docker daemon is not running" >&2
         echo "Try something like: sudo systemctl start docker"
@@ -2417,9 +2671,6 @@ main() {
         return 0
         ;;
     esac
-
-    # TODO: if OPENCODE_WORKSPACE env is set, then we can use then over workspace
-    # when no argument is provided
 
     # Get the workspace directory from arguments or current directory
     local ws_out
@@ -2620,7 +2871,6 @@ main() {
         echo "command not implemented"
         ;;
     git)
-        # TODO: does not require the full context, only the workspace param
         _opencode_ctx opencode:git "$ws_out" "$@"
         ;;
     repl)

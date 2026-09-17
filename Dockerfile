@@ -4,8 +4,14 @@
 # This file is intended for local/user-specific customizations.
 # To keep it ignored by Git, modify your local index:
 #   git update-index --assume-unchanged Dockerfile
+#   git update-index --skip-worktree Dockerfile
 # If you want to start tracking the file again:
 #   git update-index --no-assume-unchanged Dockerfile
+#
+# For project specific images, point your opencode at your project the laucnher 
+# will then build the container from your project workspace.
+#   OPENCODE_CONTEXT=~/my-custom-build \
+#       OPENCODE_DOCKERFILE=~/my-custom-build/Dockerfile.dev opencode
 #
 # The base image is layered: devsnowdon/opencode-docker:<variant> with variants
 # full (rust, go, c, node, python), duck (node, python), and empty. Point
@@ -28,4 +34,4 @@ LABEL dev.snowdon.opencode.workspace="${PROJECT_WORKSPACE}"
 # apk add --no-cache \
 #   wget yq neovim iproute2 bind-tools netcat-openbsd 
 #RUN apk add shellcheck shfmt
-#USER other
+USER other

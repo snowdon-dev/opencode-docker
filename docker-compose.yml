@@ -1,5 +1,6 @@
 services:
     opencode:
+        init: true
         #image: ghcr.io/anomalyco/opencode:1.14.47
         #image: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker}
         build:

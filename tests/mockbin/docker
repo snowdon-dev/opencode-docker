@@ -129,45 +129,35 @@ elif [[ "$1" == "ps" ]]; then
     fi
 elif [[ "$1" == "inspect" ]]; then
     shift
-    # Return the workspace value from the container's Config.Labels. When
-    # OPENCODE_TEST_CONFLICT=1 the label resolves to a *different* workspace so
-    # the launcher can see a coexisting container and warn about it.
-    f=""
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-        --format)
-            f="$2"
-            shift 2
-            ;;
-        -*) shift ;;
-        *) shift ;;
-        esac
-    done
-    if [[ "$f" == *"State.Status"* ]]; then
-        # Combined record used by opencode:ls: id, status, workspace, project,
-        # tui, sentinel. The trailing '.' keeps empty trailing label columns in
-        # place through the launcher's `read -a` splitting. The format must use a
-        # Go string literal ({{"\t"}}) for field separators: docker inspect does
-        # NOT interpolate a raw \t, so reflect that here by emitting literal
-        # backslash-t when the format lacks the Go literal.
-        sep="\t"
-        if [[ "$f" == *'{{"\t"}}'* ]]; then
-            sep=$'\t'
-        fi
-        printf 'c1%srunning%s%s%sws%sfalse%s.\n' "$sep" "$sep" "$PWD" "$sep" "$sep" "$sep"
-    elif [[ "$f" == *'{{"\t"}}'* ]]; then
-        # Combined record used by _find_docker_managed (oneoff + tui labels).
-        # Both values render empty so the container passes the oneoff filter.
-        printf '\t\t.\n'
-    elif [[ "${OPENCODE_TEST_CONFLICT:-}" == "1" ]]; then
-        echo "/workspace/other"
-    else
-        echo "$PWD"
+    # Every container inspect goes through the launcher's _container_info helper,
+    # whose tab-separated record is: id, status, workspace, project, oneoff, tui,
+    # parent, sentinel. The trailing '.' keeps empty trailing label columns in
+    # place through the launcher's `read -a` splitting. With
+    # OPENCODE_TEST_CONFLICT=1 the workspace resolves to a different path so the
+    # launcher can see a coexisting container and warn about it.
+    ws="$PWD"
+    if [[ "${OPENCODE_TEST_CONFLICT:-}" == "1" ]]; then
+        ws="/workspace/other"
     fi
-    # Note: f is the format string; not needed to mock the value.
+    printf 'c1\t%s\t%s\tws\tfalse\t\t\t.\n' "${OPENCODE_TEST_STATUS:-running}" "$ws"
 elif [[ "$1" == "rm" ]]; then
     shift
     echo "mocked: rm $*"
+elif [[ "$1" == "exec" ]]; then
+    # docker exec is used by the launcher's idle detection (ls table). Consume
+    # the container id, then simulate `pgrep -f 'opencode'`: exit 0 when an
+    # opencode process is present, exit 1 when it is not
+    # (OPENCODE_TEST_NO_SERVE=1), so ls can report "idle".
+    shift
+    cid="${1:-}"
+    shift
+    if [[ "${1:-}" == "pgrep" ]]; then
+        if [[ "${OPENCODE_TEST_NO_SERVE:-}" == "1" ]]; then
+            exit 1
+        fi
+        exit 0
+    fi
+    echo "mocked: exec $cid $*"
 else
     echo "mocked: unknown $*"
 fi

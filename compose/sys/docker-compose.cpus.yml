@@ -1,0 +1,3 @@
+services:
+    opencode:
+        cpus: ${OPENCODE_CPUS}

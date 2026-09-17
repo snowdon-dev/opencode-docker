@@ -43,7 +43,12 @@ RUN apk add --no-cache \
     bash>=5.3 \
     ripgrep>=15.1 \
     libgcc>=15.2 \
-    libstdc++>=15.2
+    libstdc++>=15.2 \
+    neovim
+
+
+ENV EDITOR=nvim
+ENV VISUAL=nvim
 
 # Smoke tests for system packages
 RUN git --version \

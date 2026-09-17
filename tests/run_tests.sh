@@ -28,7 +28,7 @@ declare -a FAILED_TESTS=()
 # with a .git dir so the launcher's read-only .git mount logic is exercised.
 make_sandbox() {
     SD="$(mktemp -d "${TMPDIR:-/tmp}/opencode-tests.XXXXXX")"
-    mkdir -p "$SD/compose" "$SD/compose/compose-vol" "$SD/compose/compose-net" "$SD/ws/.git"
+    mkdir -p "$SD/compose" "$SD/compose/compose/vol" "$SD/compose/compose/net" "$SD/compose/compose/sys" "$SD/ws/.git"
     echo 'services: { opencode: {} }' >"$SD/compose/docker-compose.yml"
     # Compose base args used in every expected command (git mount is pruned by
     # mktemp normalisation).
@@ -41,9 +41,13 @@ make_sandbox() {
     CPARENTPS="docker ps -q -a --filter label=dev.snowdon.opencode.managed=true --filter label=dev.snowdon.opencode.parent=$SD/ws"
     # The workspace-scoped listing used by up/setup (opencode:list).
     CWSPS="docker ps -q -a --filter label=dev.snowdon.opencode.managed=true --filter label=dev.snowdon.opencode.workspace=$SD/ws"
-    # docker inspect records: oneoff filter check and the ls table record.
-    CONEOFF="docker inspect --format {{index .Config.Labels \"com.docker.compose.oneoff\"}}{{\"\\t\"}}{{index .Config.Labels \"dev.snowdon.opencode.tui\"}}{{\"\\t\"}}. c1"
-    CLSREC="docker inspect --format {{.ID}}{{\"\\t\"}}{{.State.Status}}{{\"\\t\"}}{{index .Config.Labels \"dev.snowdon.opencode.workspace\"}}{{\"\\t\"}}{{index .Config.Labels \"com.docker.compose.project\"}}{{\"\\t\"}}{{index .Config.Labels \"com.docker.compose.oneoff\"}}{{\"\\t\"}}{{index .Config.Labels \"dev.snowdon.opencode.tui\"}}{{\"\\t\"}}. c1"
+    # docker inspect record produced by the launcher's _container_info helper
+    # (id, status, workspace, project, oneoff, tui, parent, sentinel).
+    CINFO="docker inspect --format {{.ID}}{{\"\\t\"}}{{.State.Status}}{{\"\\t\"}}{{index .Config.Labels \"dev.snowdon.opencode.workspace\"}}{{\"\\t\"}}{{index .Config.Labels \"com.docker.compose.project\"}}{{\"\\t\"}}{{index .Config.Labels \"com.docker.compose.oneoff\"}}{{\"\\t\"}}{{index .Config.Labels \"dev.snowdon.opencode.tui\"}}{{\"\\t\"}}{{index .Config.Labels \"dev.snowdon.opencode.parent\"}}{{\"\\t\"}}. c1"
+    # `opencode:list` probes a running main container for any opencode process
+    # (serve, run, attach, ...) so it can render STATUS as "idle" when none is
+    # up (mock exits 1 when OPENCODE_TEST_NO_SERVE=1).
+    CPGREP="docker exec c1 pgrep -f opencode"
 }
 
 # Run the launcher, capturing both the launcher's stdout/err and the mock
@@ -144,14 +148,15 @@ t_up() {
 $CPARENTPS
 $CBASE up -d opencode
 $CWSPS
-$CONEOFF
+$CINFO
 $CPARENTPS
-$CLSREC"
+$CINFO
+$CPGREP"
 }
 
 t_stop() {
     # stop: dispatched before workspace resolution, discovers managed containers
-    # via _find_docker_managed (all workspaces by default), stops each.
+    # via _select_managed_containers (all workspaces by default), stops each.
     run_launcher /dev/null stop
     assert_docker_contains "docker ps -q --filter label=dev.snowdon.opencode.managed=true"
     assert_docker_contains "docker stop c1"
@@ -197,9 +202,10 @@ t_setup() {
 $CPARENTPS
 $CBASE up -d --no-recreate opencode
 $CWSPS
-$CONEOFF
+$CINFO
 $CPARENTPS
-$CLSREC
+$CINFO
+$CPGREP
 $CBASE ps -q opencode
 $CBASE exec -T -w /workspace opencode npm install"
     assert_launcher_output_contains "Setting up opencode project: ws"
@@ -256,26 +262,26 @@ docker compose -p ws -f $SD/compose/docker-compose.yml config --services"
 
 t_cache_all() {
     # OPENCODE_CACHE=all mounts every toolchain cache via docker-compose.cache.yml.
-    echo 'services: { opencode: {} }' >"$SD/compose/compose-vol/docker-compose.cache.yml"
+    echo 'services: { opencode: {} }' >"$SD/compose/compose/vol/docker-compose.cache.yml"
     local dotfile="$SD/cache.env"
     echo 'OPENCODE_CACHE=all' >"$dotfile"
     run_launcher "$dotfile" compose config --services
     assert_docker "$DINFO
 $CPARENTPS
-docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose-vol/docker-compose.cache.yml -f <tmp>/docker-compose.git.yml config --services"
+docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/vol/docker-compose.cache.yml -f <tmp>/docker-compose.git.yml config --services"
     unset OPENCODE_CACHE
 }
 
 t_cache_ids() {
     # Space-separated ids (case-insensitive) add only those override files.
-    echo 'services: { opencode: {} }' >"$SD/compose/compose-vol/docker-compose.go.yml"
-    echo 'services: { opencode: {} }' >"$SD/compose/compose-vol/docker-compose.python.yml"
+    echo 'services: { opencode: {} }' >"$SD/compose/compose/vol/docker-compose.go.yml"
+    echo 'services: { opencode: {} }' >"$SD/compose/compose/vol/docker-compose.python.yml"
     local dotfile="$SD/cache.env"
     echo 'OPENCODE_CACHE="Go PYTHON"' >"$dotfile"
     run_launcher "$dotfile" compose config --services
     assert_docker "$DINFO
 $CPARENTPS
-docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose-vol/docker-compose.go.yml -f $SD/compose/compose-vol/docker-compose.python.yml -f <tmp>/docker-compose.git.yml config --services"
+docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/vol/docker-compose.go.yml -f $SD/compose/compose/vol/docker-compose.python.yml -f <tmp>/docker-compose.git.yml config --services"
     unset OPENCODE_CACHE
 }
 
@@ -306,6 +312,48 @@ t_cache_unknown() {
         echo "  ok: unknown cache id exits non-zero"
     fi
     unset OPENCODE_CACHE
+}
+
+t_cpu_cpuset() {
+    # OPENCODE_CPUSET merges only the cpuset override file; cpus is not added.
+    echo 'services: { opencode: {} }' >"$SD/compose/compose/sys/docker-compose.cpuset.yml"
+    echo 'services: { opencode: {} }' >"$SD/compose/compose/sys/docker-compose.cpus.yml"
+    local dotfile="$SD/cpu.env"
+    echo 'OPENCODE_CPUSET=2-3' >"$dotfile"
+    run_launcher "$dotfile" compose config --services
+    assert_docker "$DINFO
+$CPARENTPS
+docker compose -p ws -f $SD/compose/docker-compose.yml -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.cpuset.yml config --services"
+    assert_launcher_output_contains "Using CPUSET: 2-3"
+    unset OPENCODE_CPUSET
+}
+
+t_cpu_cpus() {
+    # OPENCODE_CPUS merges only the cpus override file; cpuset is not added.
+    echo 'services: { opencode: {} }' >"$SD/compose/compose/sys/docker-compose.cpus.yml"
+    local dotfile="$SD/cpu.env"
+    echo 'OPENCODE_CPUS=2' >"$dotfile"
+    run_launcher "$dotfile" compose config --services
+    assert_docker "$DINFO
+$CPARENTPS
+docker compose -p ws -f $SD/compose/docker-compose.yml -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.cpus.yml config --services"
+    assert_launcher_output_contains "Using CPUS: 2"
+    unset OPENCODE_CPUS
+}
+
+t_cpu_both() {
+    # Both set: both override files are merged, cpuset first.
+    echo 'services: { opencode: {} }' >"$SD/compose/compose/sys/docker-compose.cpuset.yml"
+    echo 'services: { opencode: {} }' >"$SD/compose/compose/sys/docker-compose.cpus.yml"
+    local dotfile="$SD/cpu.env"
+    printf '%s\n' 'OPENCODE_CPUSET=2-3' 'OPENCODE_CPUS=2' >"$dotfile"
+    run_launcher "$dotfile" compose config --services
+    assert_docker "$DINFO
+$CPARENTPS
+docker compose -p ws -f $SD/compose/docker-compose.yml -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.cpuset.yml -f $SD/compose/compose/sys/docker-compose.cpus.yml config --services"
+    assert_launcher_output_contains "Using CPUSET: 2-3"
+    assert_launcher_output_contains "Using CPUS: 2"
+    unset OPENCODE_CPUSET OPENCODE_CPUS
 }
 
 t_start() {
@@ -425,9 +473,30 @@ t_down() {
     assert_launcher_output_contains "Stopping opencode project: ws"
 }
 
+t_down_refuses_other() {
+    # down can only remove the current workspace's project, so the --other flag
+    # (act on everything except the current workspace) has no coherent meaning
+    # and must be refused without touching docker.
+    local dotfile="$SD/down-other.env"
+    : >"$dotfile"
+    run_launcher "$dotfile" down --other
+    if ((LAUNCH_RC == 2)) &&
+        grep -Fq "error: --other cannot be combined with down" <<<"$LAUNCH_OUT"; then
+        PASS=$((PASS + 1))
+        echo "  ok: down --other refused with a clear message"
+    else
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("down_refuses_other")
+        echo "  FAIL: down --other should exit 2 with a refusal message"
+        printf '  rc=%s out=%s\n' "$LAUNCH_RC" "$LAUNCH_OUT" | sed 's/^/    /'
+    fi
+    # Refuse before even probing docker: nothing may be downed.
+    assert_docker ""
+}
+
 t_delete() {
     # delete: dispatched before workspace resolution, discovers managed containers
-    # via _find_docker_managed --stopped (includes -a for stopped containers),
+    # via _select_managed_containers --stopped (includes -a for stopped containers),
     # force-removes each.
     run_launcher /dev/null delete
     assert_docker_contains "docker ps -q -a --filter label=dev.snowdon.opencode.managed=true"
@@ -443,6 +512,9 @@ t_ls() {
     run_launcher /dev/null ls
     assert_docker_contains "docker ps -q -a --filter label=dev.snowdon.opencode.managed=true"
     assert_docker_contains '{{"\t"}}'
+    # A running main container is probed for its backend process before it is
+    # reported as running (rather than idle).
+    assert_docker_contains "$CPGREP"
     assert_launcher_output_contains "CONTAINER ID"
     assert_launcher_output_contains "STATUS"
     assert_launcher_output_contains "WORKSPACE"
@@ -450,6 +522,40 @@ t_ls() {
     assert_launcher_output_contains "c1"
     assert_launcher_output_contains "running"
     assert_launcher_output_contains "main"
+}
+
+t_ls_idle() {
+    # A running container whose backend process is gone (OPENCODE_TEST_NO_SERVE=1
+    # makes the pgrep probe exit 1) must be reported as idle, not running.
+    OPENCODE_TEST_NO_SERVE=1 run_launcher /dev/null ls
+    assert_docker_contains "$CPGREP"
+    assert_launcher_output_contains "c1"
+    assert_launcher_output_contains "idle"
+    if grep -Fq "running" <<<"$LAUNCH_OUT"; then
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$CURRENT:running")
+        echo "  FAIL: idle container must not be reported as running"
+    else
+        PASS=$((PASS + 1))
+        echo "  ok: idle container is not reported as running"
+    fi
+}
+
+t_ls_stopped() {
+    # A stopped container must keep its own State.Status and must NOT be probed
+    # for the backend process: `docker exec` on a stopped container would fail
+    # and mislabel it as idle.
+    OPENCODE_TEST_STATUS=exited run_launcher /dev/null ls
+    if grep -Fq "$CPGREP" <<<"$DOCKER_LOG"; then
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$CURRENT:no_pgrep")
+        echo "  FAIL: stopped containers must not be probed for the opencode process"
+    else
+        PASS=$((PASS + 1))
+        echo "  ok: stopped containers are not probed for the opencode process"
+    fi
+    assert_launcher_output_contains "c1"
+    assert_launcher_output_contains "exited"
 }
 
 t_ls_quiet() {
