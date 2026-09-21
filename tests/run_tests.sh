@@ -828,6 +828,107 @@ FAKE
     fi
 }
 
+t_outside_root_abort() {
+    # With SD_YOLO=false and HOME pointing outside the workspace, a command must
+    # prompt about the directory and abort (exit != 0) without reaching any
+    # compose command. The prompt reads from /dev/tty, which the test harness
+    # has no controlling terminal for, so the default-abort path always runs
+    # here.
+    local dotfile="$SD/yolo-off.env"
+    mkdir -p "$SD/home"
+    printf '%s\n' 'SD_YOLO=false' "HOME=$SD/home" >"$dotfile"
+    run_launcher "$dotfile" up
+    assert_docker "$DINFO"
+    assert_launcher_output_contains "is outside a subdirectory of HOME:"
+    assert_launcher_output_contains "$SD/ws"
+    assert_launcher_output_contains "Aborted."
+    if [[ "$LAUNCH_RC" -eq 0 ]]; then
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$CURRENT:exit")
+        echo "  FAIL: outside-root command did not abort"
+    else
+        PASS=$((PASS + 1))
+        echo "  ok: outside-root command aborts"
+    fi
+}
+
+t_outside_root_validate() {
+    # Unit test for the _check_valid_within_root contract behind the prompt:
+    # HOME subdirectory rules, the "/" root shorthand, trailing-slash
+    # normalisation, the normalized path written back through param 3, and the
+    # previously-approved roots in param 4. Sourcing the launcher reuses the
+    # real function without docker or a terminal. The approve() wrapper mirrors
+    # _assert_maybe_check_outside_root's scope chain (a local ws_out_normalized
+    # receiving the nameref writeback), guarding against a same-named local
+    # inside the helper silently swallowing it.
+    cat >"$SD/check.sh" <<'SCRIPT'
+set +e
+source "$LAUNCHER"
+set +e
+pass=1
+
+# Contract: HOME subdirectory rules, trailing-slash normalisation, "/" root.
+norm=""; prev=""
+_check_valid_within_root "$HOME/proj" "$HOME" norm prev || { echo "FAIL inside"; pass=0; }
+[[ "$norm" == "$HOME/proj" ]] || { echo "FAIL norm=$norm"; pass=0; }
+_check_valid_within_root "$HOME/proj/" "$HOME" norm prev || { echo "FAIL trailing"; pass=0; }
+[[ "$norm" == "$HOME/proj" ]] || { echo "FAIL norm2=$norm"; pass=0; }
+_check_valid_within_root "$HOME/sub" "$HOME" norm prev || { echo "FAIL deeper"; pass=0; }
+_check_valid_within_root "$HOME" "$HOME" norm prev && { echo "FAIL home itself counted"; pass=0; }
+_check_valid_within_root / / norm prev && { echo "FAIL / counted"; pass=0; }
+_check_valid_within_root /anywhere / norm prev || { echo "FAIL under-slash-root"; pass=0; }
+_check_valid_within_root "$SD_OTHER" "$HOME" norm prev && { echo "FAIL outside"; pass=0; }
+
+# Previously approved roots (param 4) pass once listed.
+prev="$HOME/approved
+"
+_check_valid_within_root "$HOME/approved/deep" "$HOME" norm prev || { echo "FAIL approved"; pass=0; }
+_check_valid_within_root "$HOME/approved/" "$HOME" norm prev || { echo "FAIL approved trailing"; pass=0; }
+_check_valid_within_root "$SD_OTHER/approved" "$HOME" norm prev && { echo "FAIL sibling"; pass=0; }
+
+# Scope parity: the production caller declares local ws_out_normalized and
+# relies on the nameref writeback reaching it (bash resolves namerefs
+# innermost-first, so a same-named local in the helper would swallow it).
+tmp_approved=""
+approve() {
+    local ws_out="$1" home="$2" ws_out_normalized="" rc=0
+    if _check_valid_within_root "$ws_out" "$home" ws_out_normalized tmp_approved; then
+        return 0
+    fi
+    # Rejected: the normalized path must still have been written back.
+    [[ "$ws_out_normalized" == "${ws_out%/}" ]] || return 99
+    tmp_approved+="$ws_out_normalized"$'\n'
+    return 1
+}
+approve "$HOME/proj/" "$HOME" || { echo "FAIL approve-inside"; pass=0; }
+# Outside HOME: rejected, recorded via the approved-dir storage, then an
+# under-path is accepted on a later call; a sibling stays rejected.
+if ! approve "$SD_OTHER/approved-one/" "$HOME"; then
+    approve "$SD_OTHER/approved-one/deep" "$HOME" || { echo "FAIL approved-dir not remembered"; pass=0; }
+else
+    echo "FAIL approve-outside accepted"
+    pass=0
+fi
+_rc=0
+approve "$SD_OTHER/approved-two" "$HOME" || _rc=1
+[[ "$_rc" -eq 0 ]] && { echo "FAIL approve-sibling accepted"; pass=0; }
+
+((pass)) && echo "outside_root_validate ok" || echo "outside_root_validate FAIL"
+SCRIPT
+    local out
+    out="$(PATH="$MOCKBIN:$PATH" LAUNCHER="$LAUNCHER" HOME="$SD/home_home" \
+        SD_OTHER="$SD/elsewhere" bash "$SD/check.sh")"
+    if grep -Fq "outside_root_validate ok" <<<"$out"; then
+        PASS=$((PASS + 1))
+        echo "  ok: _check_valid_within_root validation contract"
+    else
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$CURRENT:validate")
+        echo "  FAIL: _check_valid_within_root validation contract"
+        printf '%s\n' "$out" | sed 's/^/    /'
+    fi
+}
+
 # --- main ---------------------------------------------------------------
 
 main() {

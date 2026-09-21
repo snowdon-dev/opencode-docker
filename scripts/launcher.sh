@@ -469,30 +469,39 @@ _sanitize_network_name() {
 }
 
 _check_valid_within_root() {
-    local ws_out home ws_out_normalized valid_subdir answer root home
+    local ws_out home ws_norm valid_subdir root
     ws_out="$1"
     home="$2"
 
-    # if param three is set, use it as storage of validation, otherwise discard
+    # The trailing-slash-stripped ws_out is written back through the nameref in
+    # param three, so callers that approve it can remember the normalized dir.
+    # The internal temp is deliberately NOT named ws_out_normalized: bash
+    # resolves a nameref innermost-first, so a same-named local here would
+    # swallow the writeback before it reaches the caller.
+    local -n normalized_out="$3"
+
+    # if param four is set, use it as storage of validation, otherwise discard
     local validated=""
-    if [[ -n ${3+x} ]]; then
-        local -n validated="$3"
+    if [[ -n ${4+x} ]]; then
+        local -n validated="$4"
     fi
 
-    ws_out_normalized=$ws_out
-    while [[ $ws_out_normalized != "/" && $ws_out_normalized == */ ]]; do
-        ws_out_normalized=${ws_out_normalized%/}
+    ws_norm=$ws_out
+    while [[ $ws_norm != "/" && $ws_norm == */ ]]; do
+        ws_norm=${ws_norm%/}
     done
+    # shellcheck disable=SC2034  # written through the nameref parameter
+    normalized_out=$ws_norm
 
     valid_subdir=0
 
     if [[ $home == "/" ]]; then
         # Any non-root absolute path is a subdirectory of "/".
-        if [[ $ws_out_normalized != "/" &&
-            $ws_out_normalized == /* ]]; then
+        if [[ $ws_norm != "/" &&
+            $ws_norm == /* ]]; then
             valid_subdir=1
         fi
-    elif [[ $ws_out_normalized == "$home"/* ]]; then
+    elif [[ $ws_norm == "$home"/* ]]; then
         # The "$home/*" pattern excludes "$home" itself.
         valid_subdir=1
     fi
@@ -502,7 +511,7 @@ _check_valid_within_root() {
     if ((!valid_subdir)) && [[ -n "$validated" ]]; then
         while IFS= read -r root; do
             [[ -n "$root" ]] || continue
-            if [[ $ws_out_normalized == "$root" || $ws_out_normalized == "$root"/* ]]; then
+            if [[ $ws_norm == "$root" || $ws_norm == "$root"/* ]]; then
                 valid_subdir=1
                 break
             fi
@@ -525,6 +534,8 @@ _assert_maybe_check_outside_root() {
     # below one later passes without prompting again. This prevents repeated
     # checks for the same project (e.g. workspace and its worktree parent).
     # Remove trailing slashes, while preserving "/".
+    local home ws_out ws_out_normalized
+    ws_out="$1"
     if [[ "${SD_YOLO_HOME,,}" == "true" ]]; then
         # TODO: can be multiple parts
         home="$SD_REPO_HOME"
@@ -536,8 +547,8 @@ _assert_maybe_check_outside_root() {
     done
 
     local answer=""
-    if ! _check_valid_within_root "$1" "$home" tmp_validated; then
-        printf 'Output directory is outside a subdirectory of HOME:\n  %s\n' "$ws_out"
+    if ! _check_valid_within_root "$ws_out" "$home" ws_out_normalized tmp_validated; then
+        printf '%s is outside a subdirectory of HOME:\n  %s\n' "$ws_out" "$home"
         read -r -p "Continue anyway? [y/N] " answer </dev/tty || true
 
         case ${answer,,} in
@@ -762,7 +773,8 @@ _opencode_args_prepare() {
     # Assert the effective workspace is the profile workspace
     if [[ -n ${OPENCODE_WORKSPACE+x} ]] && [[ "$OPENCODE_WORKSPACE" != "$ws_out" ]]; then
         # running in a opencode space that is not the current
-        if ! _check_valid_within_root "$ws_out" "$OPENCODE_WORKSPACE"; then
+        local ws_out_normalized=""
+        if ! _check_valid_within_root "$ws_out" "$OPENCODE_WORKSPACE" ws_out_normalized; then
             # not within this opencode project
             local answer=""
             printf 'Effective workspace (%s) is outside of the environment workspace:\n  %s\n' "$ws_out" "$OPENCODE_WORKSPACE"
@@ -2888,6 +2900,7 @@ main() {
 
     # Skip this check when SD_YOLO is set to "true" (case-insensitive).
     # Check if the workspace lies outside of a sub directory of $HOME.
+    # TODO: if the container is already started, no need to assert
     _assert_maybe_check_outside_root "$ws_out"
 
     # Set up compose directory and project name
