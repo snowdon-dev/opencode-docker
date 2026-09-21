@@ -82,7 +82,6 @@ opencode:git status # in the worktree
 
 ## Features
 
-- [ ] Fix: not running docker-compose from sd-opencode
 - [x] Security: Prevent potential destructive actions by the agent
 - [x] Security: Configure project isolated cache storage via environment
     variables
@@ -112,8 +111,10 @@ opencode:git status # in the worktree
     that uses FROM image-full
 - [x] Fix: Allow multiple port bindings to enable multiple running agents on
     multiple projects
+- [x] Control of container + resources per workspace, including --other
 - [ ] Project creation with scaffold extra context
 - [ ] Control `--session` per workspace (blocked on opencode v1)
+- [ ] Not running docker-compose from sd-opencode?
 
 ## Install
 

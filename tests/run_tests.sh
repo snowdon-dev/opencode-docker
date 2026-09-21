@@ -504,6 +504,58 @@ t_delete() {
     assert_launcher_output_contains "Force-removing managed container"
 }
 
+t_delete_other_worktree() {
+    # delete --all --other invoked from a parent repository whose synced git
+    # worktree child is running: the effective workspace is the child (the same
+    # resolution _opencode_args_prepare applies), so the child's container, image
+    # and network are preserved while everything else is force-removed. The
+    # parent repo is a real git repo with the same commit in the child worktree
+    # so the worktree-resync check passes.
+    rm -rf "$SD/ws/.git"
+    git -C "$SD/ws" init -q -b main
+    git -C "$SD/ws" -c user.name=test -c user.email=test@example.com \
+        commit -q --allow-empty -m init
+    git -C "$SD/ws" worktree add -q -b wt-branch "$SD/wt"
+
+    OPENCODE_TEST_WORKTREE_CHILD="wt1" \
+    OPENCODE_TEST_WORKTREE_CHILD_PATH="$SD/wt" \
+    OPENCODE_TEST_IMAGE_WS="img-wt" \
+    OPENCODE_TEST_IMAGES="img-wt img-other" \
+    OPENCODE_TEST_NETWORK_WS="net-wt" \
+    OPENCODE_TEST_NETWORKS="net-wt net-other" \
+        run_launcher /dev/null delete --all --other
+
+    # The child container record: workspace=$SD/wt, parent=$SD/ws.
+    local child_info="${CINFO% c1} wt1"
+    assert_docker "$DINFO
+$CPARENTPS
+$child_info
+$child_info
+docker ps -q -a --filter label=dev.snowdon.opencode.managed=true
+$CINFO
+$child_info
+$CINFO
+docker rm -f c1
+docker image ls -q --filter label=dev.snowdon.opencode.workspace=$SD/wt
+docker network ls -q --filter label=dev.snowdon.opencode.workspace=$SD/wt
+docker image ls -q --filter label=dev.snowdon.opencode.workspace
+docker image rm img-other
+docker network ls -q --filter label=dev.snowdon.opencode.managed
+docker network rm net-other"
+
+    # The effective (child) workspace's resources must be preserved.
+    if grep -Fq "docker rm -f wt1" <<<"$DOCKER_LOG" ||
+        grep -Fq "docker image rm img-wt" <<<"$DOCKER_LOG" ||
+        grep -Fq "docker network rm net-wt" <<<"$DOCKER_LOG"; then
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$CURRENT:preserve_child")
+        echo "  FAIL: the effective (child) workspace's resources were force-removed"
+    else
+        PASS=$((PASS + 1))
+        echo "  ok: the effective (child) workspace's resources are preserved"
+    fi
+}
+
 t_ls() {
     # ls: discovers managed containers (including stopped) and prints them in a
     # ps-style table built from per-container inspect records. The record format
@@ -617,6 +669,32 @@ t_ls_all() {
     run_launcher /dev/null ls --all
     assert_docker_contains "docker ps -q -a --filter label=dev.snowdon.opencode.managed=true"
     assert_launcher_output_contains "CONTAINER ID"
+}
+
+t_ls_batch() {
+    # Two managed containers discovered in one ps call are inspected in a single
+    # docker inspect request (one record per id), not one round-trip per
+    # container. --all skips _select_managed_containers' per-id oneoff filter,
+    # so the batch is the only inspect of the listing.
+    OPENCODE_TEST_WORKTREE_CHILD="wt1" \
+    OPENCODE_TEST_WORKTREE_CHILD_PATH="$SD/ws/wt" \
+        run_launcher /dev/null ls --all
+
+    local batch_info="${CINFO% c1} c1 wt1"
+    assert_docker_contains "$batch_info"
+    assert_launcher_output_contains "c1"
+    assert_launcher_output_contains "wt1"
+    local inspect_count
+    inspect_count="$(grep -c '^docker inspect ' <<<"$DOCKER_LOG" || true)"
+    if [[ "$inspect_count" -eq 1 ]]; then
+        PASS=$((PASS + 1))
+        echo "  ok: containers inspected in a single batch"
+    else
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$CURRENT:batch")
+        echo "  FAIL: expected exactly 1 docker inspect, got $inspect_count:"
+        printf '%s\n' "$DOCKER_LOG" | sed 's/^/    /'
+    fi
 }
 
 t_changes() {

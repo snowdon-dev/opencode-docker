@@ -102,14 +102,20 @@ elif [[ "$1" == "ps" ]]; then
     if [[ "${OPENCODE_TEST_NO_CONTAINER:-}" == "1" ]]; then
         exit 0
     fi
-    # A discovery scoped to the worktree-parent label never finds anything in the
-    # fresh test sandbox (it has no worktree-child containers). Honouring the
-    # filter here keeps the launcher's worktree-child detection in
-    # _opencode_args_prepare from mis-reading the generic "c1" mock container as
-    # a worktree of the sandbox workspace (which would clobber the project name).
+    # A discovery scoped to the worktree-parent label finds the worktree-child
+    # container when the test scripts one (OPENCODE_TEST_WORKTREE_CHILD, whose
+    # parent is the current directory); otherwise it finds nothing — fresh test
+    # sandboxes have no worktree-child containers. Honouring the filter keeps the
+    # launcher's worktree-child detection in _opencode_args_prepare from
+    # mis-reading the generic "c1" mock container as a worktree of the sandbox
+    # workspace (which would clobber the project name).
     prev=""
     for a in "$@"; do
-        if [[ "$prev" == "--filter" && "$a" == *"label=dev.snowdon.opencode.parent="* ]]; then
+        if [[ "$prev" == "--filter" && "$a" == "label=dev.snowdon.opencode.parent="* ]]; then
+            if [[ -n "${OPENCODE_TEST_WORKTREE_CHILD:-}" &&
+                "${a#label=dev.snowdon.opencode.parent=}" == "$PWD" ]]; then
+                echo "$OPENCODE_TEST_WORKTREE_CHILD"
+            fi
             exit 0
         fi
         prev="$a"
@@ -117,29 +123,54 @@ elif [[ "$1" == "ps" ]]; then
     # Normal case: report a single managed container. With the -q flag only the
     # container id is printed, otherwise the "<id>\t<workspace>" form. When
     # OPENCODE_TEST_CONFLICT=1 the inspect mock returns a *different* workspace
-    # so the launcher can exercise its coexistence warning.
+    # so the launcher can exercise its coexistence warning. When a worktree
+    # child is scripted, it is reported together with the generic container.
     quiet=0
     for a in "$@"; do [[ "$a" == "-q" ]] && quiet=1; done
+    # Exit 0 explicitly: the launcher runs under `set -e` and propagates the
+    # mock's status via `ps_rc=$?` inside _managed_container_ids, so a trailing
+    # failing [[ ]] here would abort the caller.
     if [[ "$quiet" == "1" ]]; then
         echo "c1"
+        if [[ -n "${OPENCODE_TEST_WORKTREE_CHILD:-}" ]]; then
+            echo "$OPENCODE_TEST_WORKTREE_CHILD"
+        fi
+        exit 0
     elif [[ "${OPENCODE_TEST_CONFLICT:-}" == "1" ]]; then
         echo "c1	/workspace/other"
-    else
-        echo "c1	$PWD"
+        exit 0
     fi
+    echo "c1	$PWD"
+    exit 0
 elif [[ "$1" == "inspect" ]]; then
     shift
-    # Every container inspect goes through the launcher's _container_info helper,
-    # whose tab-separated record is: id, status, workspace, project, oneoff, tui,
-    # parent, sentinel. The trailing '.' keeps empty trailing label columns in
-    # place through the launcher's `read -a` splitting. With
-    # OPENCODE_TEST_CONFLICT=1 the workspace resolves to a different path so the
-    # launcher can see a coexisting container and warn about it.
-    ws="$PWD"
-    if [[ "${OPENCODE_TEST_CONFLICT:-}" == "1" ]]; then
-        ws="/workspace/other"
-    fi
-    printf 'c1\t%s\t%s\tws\tfalse\t\t\t.\n' "${OPENCODE_TEST_STATUS:-running}" "$ws"
+    # Every container inspect goes through the launcher's _container_info /
+    # _container_infos helpers, whose tab-separated record is: id, status,
+    # workspace, project, oneoff, tui, parent, sentinel. The trailing '.' keeps
+    # empty trailing label columns in place through the launcher's `read -a`
+    # splitting. With OPENCODE_TEST_CONFLICT=1 the workspace resolves to a
+    # different path so the launcher can see a coexisting container and warn
+    # about it. The scripted worktree-child container
+    # (OPENCODE_TEST_WORKTREE_CHILD) resolves to OPENCODE_TEST_WORKTREE_CHILD_PATH
+    # with its parent repo ($PWD).
+    #
+    # The launcher batches the listing's discovery into a single
+    # `docker inspect --format <template> <id>...` call, and inspects single ids
+    # elsewhere, so provide a record for every id argument.
+    [[ "$1" == "--format" ]] && shift 2
+    cid=""
+    for cid in "$@"; do
+        if [[ -n "${OPENCODE_TEST_WORKTREE_CHILD:-}" && "$cid" == "$OPENCODE_TEST_WORKTREE_CHILD" ]]; then
+            printf '%s\t%s\t%s\t%s\tfalse\tfalse\t%s\t.\n' \
+                "$cid" "running" "$OPENCODE_TEST_WORKTREE_CHILD_PATH" "wt-proj" "$PWD"
+            continue
+        fi
+        ws="$PWD"
+        if [[ "${OPENCODE_TEST_CONFLICT:-}" == "1" ]]; then
+            ws="/workspace/other"
+        fi
+        printf '%s\t%s\t%s\tws\tfalse\t\t\t.\n' "$cid" "${OPENCODE_TEST_STATUS:-running}" "$ws"
+    done
 elif [[ "$1" == "rm" ]]; then
     shift
     echo "mocked: rm $*"
@@ -158,6 +189,44 @@ elif [[ "$1" == "exec" ]]; then
         exit 0
     fi
     echo "mocked: exec $cid $*"
+elif [[ "$1" == "image" && "${2:-}" == "ls" ]]; then
+    # docker image ls [-q] --filter label=dev.snowdon.opencode.workspace[=<ws>]
+    # Scripted ids feed the delete --all cleanup: OPENCODE_TEST_IMAGES is the
+    # full set (bare workspace label filter), OPENCODE_TEST_IMAGE_WS is what a
+    # workspace-scoped query returns (the current workspace's image, which
+    # --other must preserve).
+    shift 2
+    ws_value=""
+    prev=""
+    for a in "$@"; do
+        if [[ "$prev" == "--filter" && "$a" == "label=dev.snowdon.opencode.workspace" ]]; then
+            ws_value="bare"
+        elif [[ "$prev" == "--filter" && "$a" == "label=dev.snowdon.opencode.workspace="* ]]; then
+            ws_value="${a#label=dev.snowdon.opencode.workspace=}"
+        fi
+        prev="$a"
+    done
+    if [[ -n "$ws_value" && "$ws_value" != "bare" ]]; then
+        printf '%s\n' ${OPENCODE_TEST_IMAGE_WS:-}
+    else
+        printf '%s\n' ${OPENCODE_TEST_IMAGES:-}
+    fi
+    exit 0
+elif [[ "$1" == "network" && "${2:-}" == "ls" ]]; then
+    # docker network ls [-q] --filter label=dev.snowdon.opencode.managed or
+    # --filter label=dev.snowdon.opencode.workspace=<ws>. As for images,
+    # OPENCODE_TEST_NETWORK_WS is the current workspace's network (preserved by
+    # --other), OPENCODE_TEST_NETWORKS the full managed set.
+    shift 2
+    for a in "$@"; do
+        if [[ "$a" == "label=dev.snowdon.opencode.workspace="* ||
+            "$a" == "label=dev.snowdon.opencode.workspace" ]]; then
+            printf '%s\n' ${OPENCODE_TEST_NETWORK_WS:-}
+            exit 0
+        fi
+    done
+    printf '%s\n' ${OPENCODE_TEST_NETWORKS:-}
+    exit 0
 else
     echo "mocked: unknown $*"
 fi

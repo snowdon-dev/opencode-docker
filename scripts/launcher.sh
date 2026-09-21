@@ -31,6 +31,11 @@ OPENCODE_COMPOSE="${OPENCODE_COMPOSE:-}"
 OPENCODE_CPUSET="${OPENCODE_CPUSET:-}"
 OPENCODE_CPUS="${OPENCODE_CPUS:-}"
 
+# By default .git directories are mounted read-only to protect them from
+# modification inside the container. Set SD_READ_ONLY=false to disable this
+# (see _opencode_args_prepare).
+SD_READ_ONLY="${SD_READ_ONLY:-true}"
+
 IMAGE_URL="${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker:latest}"
 
 if [[ -d "${OPENCODE_DOCKERFILE:-}" ]] && [[ -z "${OPENCODE_CONTEXT:-}" ]]; then
@@ -290,10 +295,12 @@ find_free_network() {
     local -A used_networks
     local -a networks
     mapfile -t networks < <(_driver network_ls -q --filter "label=$LABEL_NETWORK_MANAGED=true")
-    while IFS= read -r subnet; do
-        [[ -z "$subnet" ]] && continue
-        used_networks["$subnet"]=1
-    done < <(_driver network_subnets "${networks[@]}")
+    if ((${#networks[@]})); then
+        while IFS= read -r subnet; do
+            [[ -z "$subnet" ]] && continue
+            used_networks["$subnet"]=1
+        done < <(_driver network_subnets "${networks[@]}")
+    fi
 
     # Slice the range into fixed-size subnets. When subnets are smaller than
     # the range the index selects the slice bits (e.g. a /16 range slices into
@@ -613,41 +620,39 @@ _write_labels_override() {
     } >"$tmp_labels_file"
 }
 
-# Prepares the Docker Compose arguments. This function sets up the project
-# configuration including network settings and git directory mounts.
-_opencode_args_prepare() {
-    local -n ws_out="$1"
-    local -n args_out="$2"
+# Resolve the effective workspace for the given path in place, using the same git
+# worktree resolution _opencode_args_prepare applies:
+#
+#   * A worktree (its .git is a file) keeps the workspace itself; the parent
+#     repo's git dir comes back in has_parent so containers get the
+#     dev.snowdon.opencode.parent label.
+#   * A parent repository with a single in-sync worktree child container resolves
+#     to that child (has_parent then points back at the parent git dir), so
+#     `opencode:up` etc. run in the worktree from the parent directory.
+#   * A parent with no worktree children keeps the workspace itself.
+#
+# Sets ws_out (nameref) and has_parent (nameref) to the effective values and
+# updates PROJECT_NAME. Commands that must know the current workspace without
+# preparing compose args (e.g. delete --all --other) use this so they preserve
+# the effective workspace rather than the raw $PWD.
+#
+# Exits on the same errors as the prepare path (multiple/un-synced worktree
+# children), so the effective resolution is identical wherever it runs.
+_resolve_effective_workspace() {
+    local -n w="$1"
+    local -n hp="$2"
 
-    local compose_dir="${SD_OPENCODE:-$HOME/opencode}"
+    local parent_workspace
+    hp="$(_git_worktree_parent "$w/.git")"
 
-    # If the current directory is a worktree, resolve and use its parent .git directory.
-    # For worktrees, add the following label:
-    # dev.snowdon.opencode.parent=/path/to/parent/repository
-    #
-    # When locating opencode workspace containers, also consider worktrees.
-    # If `opencode:shell` is invoked from a project worktree, open the
-    # corresponding worktree container rather than the parent repository
-    # container.
-    #
-    # Example:
-    # git worktree add ../repo-wt wt-branch
-    # opencode:up /path/to/repo-wt
-    #
-    # TODO: Support `--worktree <branch>` / `--wt <branch>` to create or reuse
-    # a worktree at:
-    # $HOME/.local/state/repo/<branch>
-    local has_parent parent_workspace
-    local -a children
-    has_parent="$(_git_worktree_parent "$ws_out/.git")"
-
-    if [[ -z "$has_parent" ]] && command -v git >/dev/null 2>&1; then
-        # for parent, find worktree child and use its path as effetive
+    if [[ -z "$hp" ]] && command -v git >/dev/null 2>&1; then
+        # for parent, find worktree child and use its path as effective
         # TODO: could search only up containers
         #   which would enable multiple active worktrees
         #   at least take precedent from up containers
         #   However, it would mean that the behaviour is unpredictable
-        mapfile -t children < <(_select_managed_containers --stopped --parent "$ws_out")
+        local -a children
+        mapfile -t children < <(_select_managed_containers --stopped --parent "$w")
         if ((${#children[@]} > 1)); then
             echo "Incorrect (${children[*]}) number of children containers for this workspace."
             exit 1
@@ -670,7 +675,7 @@ _opencode_args_prepare() {
             }
             IFS=$'\t' read -r _ _ eff_path eff_proj _ _ _ _ <<<"$rec"
 
-            parent_workspace="$ws_out"
+            parent_workspace="$w"
 
             local parent_sha child_sha branch child_branch merge_base is_same_commit \
                 is_parent_merge_base
@@ -699,9 +704,9 @@ _opencode_args_prepare() {
 
             # TODO and if parent is clean?
             if ((is_same_commit || is_parent_merge_base)); then
-                ws_out="$eff_path"
+                w="$eff_path"
                 PROJECT_NAME="$eff_proj"
-                has_parent="$parent_workspace/.git"
+                hp="$parent_workspace/.git"
             elif ((is_clean)); then
                 # all changes must be commited, there is no child containers,
                 # we can do what we want
@@ -712,7 +717,7 @@ _opencode_args_prepare() {
 
                 #git -C "$eff_path" reset --hard "$branch"
                 #git -C "$eff_path" clean -df
-                #ws_out="$eff_path"
+                #w="$eff_path"
                 #PROJECT_NAME="$eff_proj"
                 echo "Invalid worktree branch - needs syncing"
                 exit 1
@@ -725,6 +730,34 @@ _opencode_args_prepare() {
             fi
         fi
     fi
+}
+
+# Prepares the Docker Compose arguments. This function sets up the project
+# configuration including network settings and git directory mounts.
+_opencode_args_prepare() {
+    local -n ws_out="$1"
+    local -n args_out="$2"
+
+    local compose_dir="${SD_OPENCODE:-$HOME/opencode}"
+
+    # If the current directory is a worktree, resolve and use its parent .git directory.
+    # For worktrees, add the following label:
+    # dev.snowdon.opencode.parent=/path/to/parent/repository
+    #
+    # When locating opencode workspace containers, also consider worktrees.
+    # If `opencode:shell` is invoked from a project worktree, open the
+    # corresponding worktree container rather than the parent repository
+    # container.
+    #
+    # Example:
+    # git worktree add ../repo-wt wt-branch
+    # opencode:up /path/to/repo-wt
+    #
+    # TODO: Support `--worktree <branch>` / `--wt <branch>` to create or reuse
+    # a worktree at:
+    # $HOME/.local/state/repo/<branch>
+    local has_parent
+    _resolve_effective_workspace ws_out has_parent
 
     # Assert the effective workspace is the profile workspace
     if [[ -n ${OPENCODE_WORKSPACE+x} ]] && [[ "$OPENCODE_WORKSPACE" != "$ws_out" ]]; then
@@ -732,7 +765,7 @@ _opencode_args_prepare() {
         if ! _check_valid_within_root "$ws_out" "$OPENCODE_WORKSPACE"; then
             # not within this opencode project
             local answer=""
-            printf 'Output directory is outside of the current workspace:\n  %s\n' "$ws_out"
+            printf 'Effective workspace (%s) is outside of the environment workspace:\n  %s\n' "$ws_out" "$OPENCODE_WORKSPACE"
             printf 'Running this command will run with this workspaces environment\n'
             read -r -p "Continue anyway? [y/N] " answer </dev/tty || true
 
@@ -822,7 +855,7 @@ _opencode_args_prepare() {
     # By default .git directories are mounted read-only to protect them from
     # modification inside the container. Set SD_READ_ONLY=false to disable this
     # and mount the workspace without the read-only git override file.
-    if [[ ! ${SD_READ_ONLY:-} =~ ^[Ff][Aa][Ll][Ss][Ee]$ ]]; then
+    if [[ "${SD_READ_ONLY,,}" != "false" ]]; then
         # SECURITY NOTE: all .git directories found within the workspace are mounted
         # read-only, plus the parent git dir when the workspace is a worktree. A
         # future improvement should consider whether to traverse up to the git root
@@ -1051,7 +1084,8 @@ _managed_container_ids() {
     rm -f -- "$ids_file"
 }
 
-# Print one tab-separated record describing the given managed container id:
+# The Go template shared by _container_info and _container_infos, printing one
+# tab-separated record per container id:
 #
 #     <id>\t<status>\t<workspace>\t<project>\t<oneoff>\t<tui>\t<parent>\t.
 #
@@ -1064,12 +1098,31 @@ _managed_container_ids() {
 # from inspect is always a map, while the .Labels from `ps --format` can surface
 # as a slice (indexing a slice by string then fails) depending on the
 # docker/compose build.
+_container_info_format() {
+    printf '%s' \
+        '{{.ID}}{{"\t"}}{{.State.Status}}{{"\t"}}{{index .Config.Labels "'"$LABEL_WORKSPACE_OPENCODE"'"}}{{"\t"}}{{index .Config.Labels "'"$LABEL_CONTAINER_PROJECT_NAME"'"}}{{"\t"}}{{index .Config.Labels "'"$LABEL_ONE_OFF"'"}}{{"\t"}}{{index .Config.Labels "'"$LABEL_TUI_OPENCODE"'"}}{{"\t"}}{{index .Config.Labels "'"$LABEL_PARENT_OPENCODE"'"}}{{"\t"}}.'
+}
+
+# Print one tab-separated record describing the given managed container id (see
+# _container_info_format for the layout).
 #
 # Returns non-zero (printing nothing) for a non-existent/stale id.
 _container_info() {
     _driver container_inspect \
-        --format '{{.ID}}{{"\t"}}{{.State.Status}}{{"\t"}}{{index .Config.Labels "'"$LABEL_WORKSPACE_OPENCODE"'"}}{{"\t"}}{{index .Config.Labels "'"$LABEL_CONTAINER_PROJECT_NAME"'"}}{{"\t"}}{{index .Config.Labels "'"$LABEL_ONE_OFF"'"}}{{"\t"}}{{index .Config.Labels "'"$LABEL_TUI_OPENCODE"'"}}{{"\t"}}{{index .Config.Labels "'"$LABEL_PARENT_OPENCODE"'"}}{{"\t"}}.' \
+        --format "$(_container_info_format)" \
         "$1" 2>/dev/null
+}
+
+# Print one tab-separated record per managed container id, from a single
+# `docker inspect` call covering all of them (docker inspect emits one formatted
+# line per id) rather than one round-trip per container. A stale/missing id only
+# writes an error to stderr, which is dropped here: it contributes no record,
+# exactly as _container_info reports nothing for a stale id.
+_container_infos() {
+    [[ $# -gt 0 ]] || return 0
+    _driver container_inspect \
+        --format "$(_container_info_format)" \
+        "$@" 2>/dev/null || true
 }
 
 # Print the ids of the managed opencode containers selected by the flags, one per
@@ -1734,12 +1787,23 @@ _opencode_parse_flags() {
     done
 }
 
-# Resolve the workspace --other must preserve: the exported WORKSPACE when
-# running inside an opencode context/repl, otherwise the directory the command
-# was invoked from. Commands in the stop/delete/list family dispatch before
-# workspace resolution, so WORKSPACE is not otherwise available to them.
+# Resolve the workspace --other must preserve: the effective workspace for the
+# calling context, not the directory the command was invoked from. When running
+# inside an opencode context/repl, WORKSPACE is already the resolved workspace;
+# otherwise the directory this command was invoked from is resolved through the
+# same git worktree logic as _opencode_args_prepare (a synced worktree child
+# supersedes its parent), so --other preserves the container, image and network
+# of the workspace the user is actually working in.
 _opencode_current_workspace() {
-    printf '%s\n' "${WORKSPACE:-$(realpath "$PWD")}"
+    if [[ -n "${WORKSPACE:-}" ]]; then
+        printf '%s\n' "$WORKSPACE"
+        return 0
+    fi
+
+    local ws has_parent=""
+    ws="$(realpath "$PWD")"
+    _resolve_effective_workspace ws has_parent
+    printf '%s\n' "$ws"
 }
 
 # Stops the existing managed containers
@@ -1833,8 +1897,6 @@ opencode:delete() {
         fi
     fi
 
-    # TODO: other and ws_scope may conflict
-
     function _ws_remove() {
         local id="$1"
         local ws_label="$2"
@@ -1870,12 +1932,13 @@ opencode:delete() {
             [[ -z "$id" ]] && continue
             ws_label="$(_find_workspace "$id")"
             _ws_remove "$id" "$ws_label"
-        done < <(_select_managed_containers "${find_args[@]}")
+        done < <(_select_managed_containers "${find_args[@]}" | sort -u)
     fi
 
     if [ "$all" -eq 1 ]; then
-
-        # Exclude WORKSPACE managed contianer if --other is set
+        # Exclude WORKSPACE managed contianer if --other is set; other_ws is the
+        # effective workspace (worktree-resolved via _opencode_current_workspace),
+        # so the images/networks of the workspace actually in use are preserved.
         local exclude_iid="" exclude_nid=""
         if ((other)); then
             local -a exclude
@@ -1887,8 +1950,9 @@ opencode:delete() {
                 echo "Invalid number of images with the workspace ($other_ws)."
                 echo "Aborting, due to invalid state..."
                 exit 1
+            elif ((${#exclude[@]} > 0)); then
+                exclude_iid="${exclude[0]}"
             fi
-            exclude_iid="${exclude[0]}"
 
             # search networks
             mapfile -t exclude < <(
@@ -1898,8 +1962,9 @@ opencode:delete() {
                 echo "Invalid number of containers with the workspace ($other_ws)."
                 echo "Aborting, due to invalid state..."
                 exit 1
+            elif ((${#exclude[@]} > 0)); then
+                exclude_nid="${exclude[0]}"
             fi
-            exclude_nid="${exclude[0]}"
         fi
 
         # remove the images
@@ -1967,10 +2032,6 @@ opencode:list() {
         fi
     fi
 
-    # Gather one _container_info record per managed container; the columns this
-    # command renders are id, status, workspace, project, oneoff, tui (the extra
-    # parent/sentinel fields are ignored here). See _container_info for the
-    # docker inspect rationale.
     local find_args=(--stopped)
     [[ -n "$ws_scope" ]] && find_args+=("$ws_scope")
     ((all)) && find_args+=(--all)
@@ -1985,16 +2046,26 @@ opencode:list() {
     ((all)) && parent_args+=(--all)
     ((other)) && parent_args+=(--other "$(_opencode_current_workspace)")
 
-    local -a records=()
-    local id rec
+    # Discover the ids first, then inspect them all in a single `docker inspect`
+    # call (one record per line) instead of one round-trip per container. The
+    # ids come out of `sort -u` sorted; docker inspect preserves no particular
+    # output order, so the records are sorted again to keep the listing
+    # deterministic. See _container_infos for the docker inspect rationale.
+    local -a ids=()
+    local id
     while read -r id; do
         [[ -z "$id" ]] && continue
-        rec="$(_container_info "$id")" || rec=""
-        [[ -n "$rec" ]] && records+=("$rec")
+        ids+=("$id")
     done < <({
         _select_managed_containers "${find_args[@]}"
         [[ -n "$ws_scope" ]] && _select_managed_containers "${parent_args[@]}"
     } | sort -u)
+
+    local -a records=()
+    local rec
+    while read -r rec; do
+        records+=("$rec")
+    done < <(_container_infos "${ids[@]}" | sort)
 
     if ((${#records[@]} == 0)); then
         if ((quiet)); then
