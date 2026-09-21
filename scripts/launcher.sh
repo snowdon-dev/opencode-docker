@@ -1134,8 +1134,9 @@ _container_infos() {
 #
 #   1. _managed_container_ids narrows by docker label filters.
 #
-#   2. Each discovered id is inspected (via _container_info) when a policy needs
-#      per-container labels:
+#   2. The discovered ids are inspected in a single `docker inspect` call (via
+#      _container_infos, one record per line) when a policy needs per-container
+#      labels:
 #        * unless --all, throwaway `compose run` oneoffs are dropped while the
 #          interactive TUI one-off is kept. A container is excluded only when it
 #          is a oneoff (label com.docker.compose.oneoff, compared
@@ -1143,7 +1144,7 @@ _container_infos() {
 #          service (dev.snowdon.opencode.tui).
 #        * --other <ws> drops containers belonging to <ws> (workspace label) and
 #          containers launched from its worktrees (parent label). Docker filters
-#          cannot express `label != x`, so this also needs the per-id inspect.
+#          cannot express `label != x`, so this also needs the single inspect.
 #
 #   Flags:
 #     -a, --all       Include oneoff (`compose run`) containers (skips the
@@ -1196,23 +1197,39 @@ _select_managed_containers() {
     if [[ -n "$ws_filter" ]]; then sel+=("$ws_filter"); fi
     if [[ -n "$parent_filter" ]]; then sel+=(--parent "$parent_filter"); fi
 
-    local id rec ws parent oneoff istui
+    # Only a policy needing per-container labels (the oneoff filter or --other)
+    # requires inspection; otherwise the discovered ids pass straight through
+    # with no inspect round-trip at all.
+    local -a ids=()
+    local id
     while read -r id; do
         [[ -z "$id" ]] && continue
         if [[ "$include_oneoff" -eq 0 || -n "$other_ws" ]]; then
-            rec="$(_container_info "$id")" || rec=""
-            IFS=$'\t' read -r _ _ ws _ oneoff istui parent _ <<<"$rec"
-            if [[ "$include_oneoff" -eq 0 ]] &&
-                [[ "${oneoff,,}" == "true" ]] && [[ "${istui,,}" != "true" ]]; then
-                continue
-            fi
-            if [[ -n "$other_ws" ]] &&
-                [[ "$ws" == "$other_ws" || "$parent" == "$other_ws" ]]; then
-                continue
-            fi
+            ids+=("$id")
+        else
+            printf '%s\n' "$id"
+        fi
+    done < <(_managed_container_ids "${sel[@]}")
+    ((${#ids[@]} == 0)) && return 0
+
+    # Inspect every discovered id in a single `docker inspect` call (one record
+    # per line) instead of one round-trip per container. Docker inspect emits
+    # records in argument order, so the printed ids keep the discovery order. A
+    # stale id contributes no record and is dropped.
+    local rec
+    while read -r rec; do
+        [[ -z "$rec" ]] && continue
+        IFS=$'\t' read -r id _ ws _ oneoff istui parent _ <<<"$rec"
+        if [[ "$include_oneoff" -eq 0 ]] &&
+            [[ "${oneoff,,}" == "true" ]] && [[ "${istui,,}" != "true" ]]; then
+            continue
+        fi
+        if [[ -n "$other_ws" ]] &&
+            [[ "$ws" == "$other_ws" || "$parent" == "$other_ws" ]]; then
+            continue
         fi
         printf '%s\n' "$id"
-    done < <(_managed_container_ids "${sel[@]}")
+    done < <(_container_infos "${ids[@]}")
 }
 
 # Resolve the workspace a managed container was created for: read the

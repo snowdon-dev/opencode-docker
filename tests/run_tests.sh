@@ -527,13 +527,15 @@ t_delete_other_worktree() {
 
     # The child container record: workspace=$SD/wt, parent=$SD/ws.
     local child_info="${CINFO% c1} wt1"
+    # The delete discovery (_select_managed_containers --other) inspects both
+    # managed containers in a single batch call.
+    local batch_info="${CINFO% c1} c1 wt1"
     assert_docker "$DINFO
 $CPARENTPS
 $child_info
 $child_info
 docker ps -q -a --filter label=dev.snowdon.opencode.managed=true
-$CINFO
-$child_info
+$batch_info
 $CINFO
 docker rm -f c1
 docker image ls -q --filter label=dev.snowdon.opencode.workspace=$SD/wt
