@@ -254,6 +254,61 @@ docker compose -p ws -f $SD/compose/docker-compose.yml config --services"
     unset SD_READ_ONLY
 }
 
+t_context_file_derive() {
+    # OPENCODE_DOCKERFILE pointing at a file derives the build context from the
+    # file's directory (basedir) and rebases the dockerfile to its basename, so
+    # compose resolves the dockerfile relative to the derived context.
+    mkdir -p "$SD/ws/myBuild"
+    : >"$SD/ws/myBuild/Dockerfile.dev"
+    local out
+    out="$(cd "$SD/ws" && PATH="$MOCKBIN:$PATH" OPENCODE_DOCKERFILE="myBuild/Dockerfile.dev" \
+        bash -c 'unset OPENCODE_CONTEXT; source "$1"
+            printf "%s|%s\n" "$OPENCODE_CONTEXT" "$OPENCODE_DOCKERFILE"' _ "$LAUNCHER")"
+    if [[ "$out" == "myBuild|Dockerfile.dev" ]]; then
+        PASS=$((PASS + 1))
+        echo "  ok: derived context and dockerfile from basedir"
+    else
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$CURRENT:derive")
+        echo "  FAIL: expected 'myBuild|Dockerfile.dev', got: '$out'"
+    fi
+}
+
+t_context_must_be_file() {
+    # OPENCODE_DOCKERFILE must name a regular file; a directory-valued variable
+    # does NOT trigger derivation (both stay at their defaults).
+    mkdir -p "$SD/ws/myBuild"
+    local out
+    out="$(cd "$SD/ws" && PATH="$MOCKBIN:$PATH" OPENCODE_DOCKERFILE="myBuild" \
+        bash -c 'unset OPENCODE_CONTEXT; source "$1"
+            printf "%s|%s\n" "$OPENCODE_CONTEXT" "$OPENCODE_DOCKERFILE"' _ "$LAUNCHER")"
+    if [[ "$out" == ".|myBuild" ]]; then
+        PASS=$((PASS + 1))
+        echo "  ok: no derivation for a directory-valued dockerfile"
+    else
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$CURRENT:no_derive_dir")
+        echo "  FAIL: expected '.|myBuild', got: '$out'"
+    fi
+}
+
+t_context_explicit_wins() {
+    # An explicitly set OPENCODE_CONTEXT is never overridden by derivation.
+    local out
+    out="$(cd "$SD/ws" && PATH="$MOCKBIN:$PATH" \
+        OPENCODE_DOCKERFILE="myBuild/Dockerfile.dev" OPENCODE_CONTEXT="myCtx" \
+        bash -c 'source "$1"
+            printf "%s|%s\n" "$OPENCODE_CONTEXT" "$OPENCODE_DOCKERFILE"' _ "$LAUNCHER")"
+    if [[ "$out" == "myCtx|myBuild/Dockerfile.dev" ]]; then
+        PASS=$((PASS + 1))
+        echo "  ok: explicit OPENCODE_CONTEXT is preserved"
+    else
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$CURRENT:explicit")
+        echo "  FAIL: expected 'myCtx|myBuild/Dockerfile.dev', got: '$out'"
+    fi
+}
+
 t_cache_all() {
     # OPENCODE_CACHE=all mounts every toolchain cache via docker-compose.cache.yml.
     echo 'services: { opencode: {} }' >"$SD/compose/compose/vol/docker-compose.cache.yml"

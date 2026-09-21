@@ -321,13 +321,15 @@ Details:
 
 - `OPENCODE_CONTEXT` / `OPENCODE_DOCKERFILE` — override the Docker build
     context directory and Dockerfile path used by the compose `build` section.
-    Defaults to `.` (project root) and `Dockerfile` respectively. For example,
+    Defaults to `.` (project root) and `Dockerfile` respectively.
+    `OPENCODE_DOCKERFILE` is an explicit Dockerfile file path, resolved relative
+    to `OPENCODE_CONTEXT`. For example,
     `OPENCODE_CONTEXT=~/my-custom-build OPENCODE_DOCKERFILE=Dockerfile.dev opencode`
-    builds from a custom location. When `OPENCODE_DOCKERFILE` points at a
-    directory (a project folder) and `OPENCODE_CONTEXT` is unset, the launcher
-    derives the build context from it, so the container can be built from the
-    project workspace itself. This replaces the old convention of always
-    requiring a `Dockerfile` in the project root.
+    builds from a custom location. When `OPENCODE_CONTEXT` is unset and
+    `OPENCODE_DOCKERFILE` points at a file, the launcher derives the build
+    context as the directory containing that file (so
+    `OPENCODE_DOCKERFILE=myBuild/Dockerfile.dev opencode` builds with context
+    `myBuild` and dockerfile `Dockerfile.dev`).
 - `OPENCODE_COMPOSE` — each entry must be a regular file with a `.yml` or
     `.yaml` extension; anything else aborts the launcher. The files are passed
     to `docker compose -f` alongside the base and (optional) network/git
