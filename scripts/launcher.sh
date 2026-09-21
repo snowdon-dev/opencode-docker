@@ -2040,11 +2040,6 @@ opencode:delete() {
 # its git worktrees (parent label match). stop/delete are NOT parent-scoped;
 # they only act on an exact workspace match. Pass --quiet to print only the
 # container ids (one per line), handy for scripting stop/delete.
-#
-# Container status:
-#   on-off  => pgrep opencode           => running, implied by container
-#   tui     => pgrep opencode attach    => running, implied by container
-#   main    => pgrep opencode           => running, no process => idle, ps -a => exited
 opencode:list() {
     local all=0 other=0 quiet=0
     local args=()
@@ -2132,14 +2127,15 @@ opencode:list() {
         elif [[ "${istui,,}" == "true" ]]; then
             mode="tui"
         else
-            # Only a running container can be probed for its backend process; a
-            # stopped one keeps its own State.Status (e.g. "exited") untouched.
-            # It is running if it has any opencode process (serve, run, attach,
-            # ...) running in it; report idle otherwise.
-            if [[ "$status" == "running" ]] &&
-                ! _driver container_exec "$id" pgrep -f 'opencode' >/dev/null 2>&1; then
-                status="idle"
-            fi
+            # STATUS mirrors the container's own docker State.Status: a running
+            # main container reports "running", a stopped one its own state
+            # (e.g. "exited"). Whether the opencode backend is actually serving
+            # inside it is no longer probed — docker exec per container does not
+            # scale. Distinguishing serving vs idle should come from a marker
+            # the running process drops once that exists.
+            # TODO: Too heavy of an operation, scales bad, need a better way:
+            # have the running process write a mark under /tmp/sd-opencode so
+            # running instances can be tracked without probing.
             mode="main"
         fi
         ids+=("$id")

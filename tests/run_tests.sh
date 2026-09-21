@@ -44,10 +44,6 @@ make_sandbox() {
     # docker inspect record produced by the launcher's _container_info helper
     # (id, status, workspace, project, oneoff, tui, parent, sentinel).
     CINFO="docker inspect --format {{.ID}}{{\"\\t\"}}{{.State.Status}}{{\"\\t\"}}{{index .Config.Labels \"dev.snowdon.opencode.workspace\"}}{{\"\\t\"}}{{index .Config.Labels \"com.docker.compose.project\"}}{{\"\\t\"}}{{index .Config.Labels \"com.docker.compose.oneoff\"}}{{\"\\t\"}}{{index .Config.Labels \"dev.snowdon.opencode.tui\"}}{{\"\\t\"}}{{index .Config.Labels \"dev.snowdon.opencode.parent\"}}{{\"\\t\"}}. c1"
-    # `opencode:list` probes a running main container for any opencode process
-    # (serve, run, attach, ...) so it can render STATUS as "idle" when none is
-    # up (mock exits 1 when OPENCODE_TEST_NO_SERVE=1).
-    CPGREP="docker exec c1 pgrep -f opencode"
 }
 
 # Run the launcher, capturing both the launcher's stdout/err and the mock
@@ -150,8 +146,7 @@ $CBASE up -d opencode
 $CWSPS
 $CINFO
 $CPARENTPS
-$CINFO
-$CPGREP"
+$CINFO"
 }
 
 t_stop() {
@@ -205,7 +200,6 @@ $CWSPS
 $CINFO
 $CPARENTPS
 $CINFO
-$CPGREP
 $CBASE ps -q opencode
 $CBASE exec -T -w /workspace opencode npm install"
     assert_launcher_output_contains "Setting up opencode project: ws"
@@ -566,9 +560,8 @@ t_ls() {
     run_launcher /dev/null ls
     assert_docker_contains "docker ps -q -a --filter label=dev.snowdon.opencode.managed=true"
     assert_docker_contains '{{"\t"}}'
-    # A running main container is probed for its backend process before it is
-    # reported as running (rather than idle).
-    assert_docker_contains "$CPGREP"
+    # A running main container reports docker's own State.Status ("running"); no
+    # idle probe is performed for its backend process.
     assert_launcher_output_contains "CONTAINER ID"
     assert_launcher_output_contains "STATUS"
     assert_launcher_output_contains "WORKSPACE"
@@ -578,36 +571,11 @@ t_ls() {
     assert_launcher_output_contains "main"
 }
 
-t_ls_idle() {
-    # A running container whose backend process is gone (OPENCODE_TEST_NO_SERVE=1
-    # makes the pgrep probe exit 1) must be reported as idle, not running.
-    OPENCODE_TEST_NO_SERVE=1 run_launcher /dev/null ls
-    assert_docker_contains "$CPGREP"
-    assert_launcher_output_contains "c1"
-    assert_launcher_output_contains "idle"
-    if grep -Fq "running" <<<"$LAUNCH_OUT"; then
-        FAIL=$((FAIL + 1))
-        FAILED_TESTS+=("$CURRENT:running")
-        echo "  FAIL: idle container must not be reported as running"
-    else
-        PASS=$((PASS + 1))
-        echo "  ok: idle container is not reported as running"
-    fi
-}
-
 t_ls_stopped() {
-    # A stopped container must keep its own State.Status and must NOT be probed
-    # for the backend process: `docker exec` on a stopped container would fail
-    # and mislabel it as idle.
+    # A stopped container keeps its own State.Status ("exited"); a running
+    # container is never probed for a backend process (docker exec is no longer
+    # used for idle detection).
     OPENCODE_TEST_STATUS=exited run_launcher /dev/null ls
-    if grep -Fq "$CPGREP" <<<"$DOCKER_LOG"; then
-        FAIL=$((FAIL + 1))
-        FAILED_TESTS+=("$CURRENT:no_pgrep")
-        echo "  FAIL: stopped containers must not be probed for the opencode process"
-    else
-        PASS=$((PASS + 1))
-        echo "  ok: stopped containers are not probed for the opencode process"
-    fi
     assert_launcher_output_contains "c1"
     assert_launcher_output_contains "exited"
 }
