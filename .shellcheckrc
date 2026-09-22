@@ -1,0 +1,6 @@
+# Shellcheck project-wide settings (auto-discovered from the working
+# directory). Variables that are only assigned as nameref write-back parameters
+# ("written through to the caller") look unused to shellcheck and always fire
+# SC2034; they are intentional, so disable the warning for the whole project
+# instead of annotating every call site.
+disable=SC2034

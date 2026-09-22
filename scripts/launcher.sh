@@ -27,6 +27,13 @@ DOCKER_ARGS="${DOCKER_ARGS:-}"
 SD_YOLO_HOME="${SD_YOLO_HOME:-false}"
 SD_YOLO="${SD_YOLO:-false}"
 
+# DRY_RUN=1 (set by the destructive commands' --dry-run flag) makes stop, delete
+# and down report what they would do instead of doing it: the destructive
+# driver primitives below print the would-be command and return success without
+# touching a container, network, or image. Read-only discovery still runs, so a
+# dry run reports the real hosts that would be affected.
+DRY_RUN=0
+
 OPENCODE_COMPOSE="${OPENCODE_COMPOSE:-}"
 OPENCODE_CPUSET="${OPENCODE_CPUSET:-}"
 OPENCODE_CPUS="${OPENCODE_CPUS:-}"
@@ -155,6 +162,18 @@ _driver() {
     "${DRIVER}_${op}" "$@"
 }
 
+# Run a docker command through docker_exec unless DRY_RUN is active, in which
+# case print the command and return success without executing it. Wraps only
+# the destructive primitives (stop/kill/rm and image/network rm) so --dry-run
+# leaves containers, images, and networks untouched while discovery still runs.
+_docker_run_destructive() {
+    if ((DRY_RUN)); then
+        echo "DRY RUN: docker $*"
+        return 0
+    fi
+    docker_exec "$@"
+}
+
 # --- docker driver -------------------------------------------------------
 # Wraps docker_exec (which prepends DOCKER_ARGS) for every operation the
 # launcher needs. The podman_<op> stubs below mark the future driver's shape.
@@ -182,15 +201,15 @@ docker_network_create() {
         --label="$LABEL_NETWORK_WORKSPACE=$workspace" \
         "$name"
 }
-docker_network_rm() { docker_exec network rm "$@"; }
+docker_network_rm() { _docker_run_destructive network rm "$@"; }
 docker_container_ls() { docker_exec ps "$@"; }
 docker_container_inspect() { docker_exec inspect "$@"; }
-docker_container_rm() { docker_exec rm "$@"; }
-docker_container_kill() { docker_exec kill "$@"; }
-docker_container_stop() { docker_exec stop "$@"; }
+docker_container_rm() { _docker_run_destructive rm "$@"; }
+docker_container_kill() { _docker_run_destructive kill "$@"; }
+docker_container_stop() { _docker_run_destructive stop "$@"; }
 docker_container_exec() { docker_exec exec "$@"; }
 docker_image_ls() { docker_exec image ls "$@"; }
-docker_image_rm() { docker_exec image rm "$@"; }
+docker_image_rm() { _docker_run_destructive image rm "$@"; }
 docker_image_inspect() { docker_exec image inspect "$@"; }
 
 # --- podman driver (stubs: not implemented yet) --------------------------
@@ -362,7 +381,6 @@ _network_builder() {
     fi
 
     # create a new network
-    # TODO: Project name conflict - proj name is derived from basename, mighe have conflicts
     network_name="sd-$proj-default"
 
     available_subnet="$(find_free_network)" || {
@@ -370,7 +388,7 @@ _network_builder() {
         return 1
     }
 
-    # TODO: create network as a compose network, not external
+    # FEATURE: create network as a compose network, not external
     _driver network_create "$network_name" "$available_subnet" "$workspace" \
         >/dev/null 2>&1 || {
         # Failure: A project with name ($PROJECT_NAME) already existed and is active?
@@ -455,7 +473,7 @@ _assert_file_is_yml() {
     esac
 }
 
-_sanitize_network_name() {
+_sanitize_name() {
     local name="$1"
 
     name="${name,,}"               # lowercase
@@ -466,7 +484,7 @@ _sanitize_network_name() {
     name="${name#[-._]}"
     name="${name%[-._]}"
 
-    printf '%s\n' "$name"
+    printf '%s' "$name"
 }
 
 _check_valid_within_root() {
@@ -491,7 +509,6 @@ _check_valid_within_root() {
     while [[ $ws_norm != "/" && $ws_norm == */ ]]; do
         ws_norm=${ws_norm%/}
     done
-    # shellcheck disable=SC2034  # written through the nameref parameter
     normalized_out=$ws_norm
 
     valid_subdir=0
@@ -538,7 +555,7 @@ _assert_maybe_check_outside_root() {
     local home ws_out ws_out_normalized
     ws_out="$1"
     if [[ "${SD_YOLO_HOME,,}" == "true" ]]; then
-        # TODO: can be multiple parts
+        # FEATURE: Allow multiple home directories
         home="$SD_REPO_HOME"
     else
         home="$HOME"
@@ -569,7 +586,7 @@ _assert_maybe_check_outside_root() {
 # Vendor/build/test-artifact directories are pruned so throwaway nested repos
 # (e.g. node_modules, tests/.tmp sandboxes) aren't mounted or counted, which
 # keeps the compose config stable across command invocations.
-# TODO: read the exclude list from .gitignore?
+# TODO: Read the exclude list from .gitignore?
 _find_workspace_git_dirs() {
     local ws="$1"
     find "$ws" \
@@ -617,8 +634,7 @@ _write_git_override() {
 # parent path. The file lives in the shared tmp_compose_dir and cleanup removes
 # the whole dir; tmp_labels_file lets the caller merge it into the args.
 _write_labels_override() {
-    local parent_gitdir="$1"
-    local parent_wt="${parent_gitdir%.git}"
+    local parent_wt="$1"
     parent_wt="${parent_wt%/}"
     if [[ -z "$tmp_compose_dir" ]]; then
         tmp_compose_dir="$(mktemp -d)"
@@ -650,34 +666,48 @@ _write_labels_override() {
 #
 # Exits on the same errors as the prepare path (multiple/un-synced worktree
 # children), so the effective resolution is identical wherever it runs.
+#
+# If the current directory is a worktree, resolve and use its parent .git directory.
+# For worktrees, add the following label:
+# dev.snowdon.opencode.parent=/path/to/parent/repository
+#
+# When locating opencode workspace containers, also consider worktrees.
+# If `opencode:shell` is invoked from a project worktree, open the
+# corresponding worktree container rather than the parent repository
+# container.
+#
+# Example:
+# git worktree add ../repo-wt wt-branch
+# opencode:up /path/to/repo-wt
+#
+# FEATURE: Support `--worktree <branch>` / `--wt <branch>` to create or reuse
+# a worktree at:
+# $HOME/.local/state/repo/<branch>
+# NOTE: could search only up containers which would enable multiple active
+# worktrees - at least take precedent from up containers However, it would mean
+# that the behaviour is unpredictable
+# NOTE: When both a child and a parent are up? If `up` is called from the
+# parent, the parent will open the child; if called from the child, it will
+# open the child.
 _resolve_effective_workspace() {
     local -n w="$1"
     local -n hp="$2"
 
     local parent_workspace
     hp="$(_git_worktree_parent "$w/.git")"
+    hp="${hp%/.git}"
+    
+    # TODO: When a path parent is given for a parent, but a existing child
+    #   is already up, it does not respect the path
 
     if [[ -z "$hp" ]] && command -v git >/dev/null 2>&1; then
         # for parent, find worktree child and use its path as effective
-        # TODO: could search only up containers
-        #   which would enable multiple active worktrees
-        #   at least take precedent from up containers
-        #   However, it would mean that the behaviour is unpredictable
         local -a children
         mapfile -t children < <(_select_managed_containers --stopped --parent "$w")
         if ((${#children[@]} > 1)); then
             echo "Incorrect (${children[*]}) number of children containers for this workspace."
             exit 1
         elif ((${#children[@]} > 0)); then
-            # When operating from a parent repository, determine whether a child
-            # worktree is in sync with the current branch.
-            #
-            # A worktree is considered in sync when either:
-            # - its HEAD matches the current HEAD; or
-            # - its merge-base with the current branch is the current HEAD,
-            # indicating that the worktree branch contains the current branch
-            # plus additional commits.
-            #
             local child_worktree="${children[0]}" eff_path eff_proj rec
             # this is the effective worktree, get the path info. _container_info
             # fields are id, status, workspace (eff_path), project (eff_proj), ...
@@ -688,109 +718,92 @@ _resolve_effective_workspace() {
             IFS=$'\t' read -r _ _ eff_path eff_proj _ _ _ _ <<<"$rec"
 
             parent_workspace="$w"
-
-            local parent_sha child_sha branch child_branch merge_base is_same_commit \
-                is_parent_merge_base
-            # Guard every git call so a failure (e.g. an unrelated/diverged
-            # worktree branch, a detached HEAD, or an unborn branch) cannot abort
-            # the launcher via set -e; the empty result falls through to the
-            # "needs syncing" handling below.
-            parent_sha="$(git -C "$parent_workspace" rev-parse HEAD 2>/dev/null || true)"
-            child_sha="$(git -C "$eff_path" rev-parse HEAD 2>/dev/null || true)"
-            branch="$(git -C "$parent_workspace" branch --show-current 2>/dev/null || true)"
-            child_branch="$(git -C "$eff_path" branch --show-current 2>/dev/null || true)"
-            merge_base="$(git -C "$eff_path" merge-base "$branch" "$child_branch" 2>/dev/null || true)"
-
-            is_same_commit=0
-            is_parent_merge_base=0
-            if [[ -n "$parent_sha" && -n "$child_sha" && "$parent_sha" == "$child_sha" ]]; then
-                is_same_commit=1
-            elif [[ -n "$parent_sha" && -n "$merge_base" && "$merge_base" == "$parent_sha" ]]; then
-                is_parent_merge_base=1
-            fi
-
-            is_clean=0
-            if [[ -z "$(git -C "$eff_path" status --porcelain)" ]]; then
-                is_clean=1
-            fi
-
-            # TODO and if parent is clean?
-            if ((is_same_commit || is_parent_merge_base)); then
-                w="$eff_path"
-                PROJECT_NAME="$eff_proj"
-                hp="$parent_workspace/.git"
-            elif ((is_clean)); then
-                # all changes must be commited, there is no child containers,
-                # we can do what we want
-                # but the branch is different, needs syncing - so what to do
-                #echo "Reseting worktree branch to parent branch: $branch"
-
-                # TODO: if parent is ahead, git -C "$eff_path" rebase $parent_branch
-
-                #git -C "$eff_path" reset --hard "$branch"
-                #git -C "$eff_path" clean -df
-                #w="$eff_path"
-                #PROJECT_NAME="$eff_proj"
-                echo "Invalid worktree branch - needs syncing"
-                exit 1
-            else
-                echo "The workspace already has changes that are not related to the current branch: $branch"
-                exit 1
-                # it has a mergebase that is not the head of parent either another
-                # random branch, or something that was branches from a previous head
-                # state - requires syncing
-            fi
+    
+            # assign to globals
+            w="$eff_path"
+            PROJECT_NAME="$eff_proj"
+            hp="$parent_workspace"
         fi
+    fi
+}
+
+# When operating from a parent repository, determine whether a child
+# worktree is in sync with the current branch.
+#
+# A worktree is considered in sync when either:
+# - its HEAD matches the current HEAD; or
+# - its merge-base with the current branch is the current HEAD,
+# indicating that the worktree branch contains the current branch
+# plus additional commits.
+#
+_aseert_sync_worktree() {
+    local parent_workspace="$1"
+    local eff_path="$2"
+
+    # Nothing to sync when the workspace is not a worktree child.
+    if [[ -z "$parent_workspace" ]]; then
+        return 0
+    fi
+
+    local parent_sha child_sha branch child_branch merge_base is_same_commit \
+        is_parent_merge_base
+    # Guard every git call so a failure (e.g. an unrelated/diverged
+    # worktree branch, a detached HEAD, or an unborn branch) cannot abort
+    # the launcher via set -e; the empty result falls through to the
+    # "needs syncing" handling below.
+    parent_sha="$(git -C "$parent_workspace" rev-parse HEAD 2>/dev/null || true)"
+    child_sha="$(git -C "$eff_path" rev-parse HEAD 2>/dev/null || true)"
+    branch="$(git -C "$parent_workspace" branch --show-current 2>/dev/null || true)"
+    child_branch="$(git -C "$eff_path" branch --show-current 2>/dev/null || true)"
+    merge_base="$(git -C "$eff_path" merge-base "$branch" "$child_branch" 2>/dev/null || true)"
+
+    is_same_commit=0
+    is_parent_merge_base=0
+    if [[ -n "$parent_sha" && -n "$child_sha" && "$parent_sha" == "$child_sha" ]]; then
+        is_same_commit=1
+    elif [[ -n "$parent_sha" && -n "$merge_base" && "$merge_base" == "$parent_sha" ]]; then
+        is_parent_merge_base=1
+    fi
+
+    is_clean=0
+    if [[ -z "$(git -C "$eff_path" status --porcelain)" ]]; then
+        is_clean=1
+    fi
+
+    # TODO and if parent is clean?
+    if ((is_same_commit || is_parent_merge_base)); then
+        return 0
+    elif ((is_clean)); then
+        # all changes must be commited, there is no child containers,
+        # we can do what we want
+        # but the branch is different, needs syncing - so what to do
+        #echo "Reseting worktree branch to parent branch: $branch"
+
+        # TODO: if parent is ahead, git -C "$eff_path" rebase $parent_branch
+
+        #git -C "$eff_path" reset --hard "$branch"
+        #git -C "$eff_path" clean -df
+        #w="$eff_path"
+        #PROJECT_NAME="$eff_proj"
+        echo "Invalid worktree branch - needs syncing"
+        exit 1
+    else
+        echo "The workspace already has changes that are not related to the current branch: $branch"
+        exit 1
+        # it has a mergebase that is not the head of parent either another
+        # random branch, or something that was branches from a previous head
+        # state - requires syncing
     fi
 }
 
 # Prepares the Docker Compose arguments. This function sets up the project
 # configuration including network settings and git directory mounts.
 _opencode_args_prepare() {
-    local -n ws_out="$1"
-    local -n args_out="$2"
+    local ws_out="$1"
+    local has_parent="$2"
+    local -n args_out="$3"
 
     local compose_dir="${SD_OPENCODE:-$HOME/opencode}"
-
-    # If the current directory is a worktree, resolve and use its parent .git directory.
-    # For worktrees, add the following label:
-    # dev.snowdon.opencode.parent=/path/to/parent/repository
-    #
-    # When locating opencode workspace containers, also consider worktrees.
-    # If `opencode:shell` is invoked from a project worktree, open the
-    # corresponding worktree container rather than the parent repository
-    # container.
-    #
-    # Example:
-    # git worktree add ../repo-wt wt-branch
-    # opencode:up /path/to/repo-wt
-    #
-    # TODO: Support `--worktree <branch>` / `--wt <branch>` to create or reuse
-    # a worktree at:
-    # $HOME/.local/state/repo/<branch>
-    local has_parent
-    _resolve_effective_workspace ws_out has_parent
-
-    # Assert the effective workspace is the profile workspace
-    if [[ -n ${OPENCODE_WORKSPACE+x} ]] && [[ "$OPENCODE_WORKSPACE" != "$ws_out" ]]; then
-        # running in a opencode space that is not the current
-        local ws_out_normalized=""
-        if ! _check_valid_within_root "$ws_out" "$OPENCODE_WORKSPACE" ws_out_normalized; then
-            # not within this opencode project
-            local answer=""
-            printf 'Effective workspace (%s) is outside of the environment workspace:\n  %s\n' "$ws_out" "$OPENCODE_WORKSPACE"
-            printf 'Running this command will run with this workspaces environment\n'
-            read -r -p "Continue anyway? [y/N] " answer </dev/tty || true
-
-            case ${answer,,} in
-            y | yes) ;;
-            *)
-                printf 'Aborted.\n' >&2
-                exit 1
-                ;;
-            esac
-        fi
-    fi
 
     # Build Docker Compose arguments starting with the main compose file
     # after resolving any worktree args
@@ -806,7 +819,7 @@ _opencode_args_prepare() {
         args_out+=(-f "$tmp_labels_file")
     fi
 
-    # TODO: Transient volumes - OPENCODE_DATA=false disables persisted volume
+    # NOTE: Transient volumes - add OPENCODE_DATA=false disables persisted volume
 
     # OPENCODE_CACHE=false disables the cache volumes, "all" adds all
     # "go python" adds go and python. Values are case-insensitive.
@@ -819,8 +832,8 @@ _opencode_args_prepare() {
             for id in ${OPENCODE_CACHE,,}; do
                 case "$id" in
                 go | node | python | rust)
-                    # TODO: should alter the image URL, if go or rust, use rull, python
-                    # or node use duck
+                    # TODO: Should alter the image URL if it is not set, if go
+                    # or rust, use full, python or node use duck
                     local file="$COMPOSE_VOL_DIR/docker-compose.$id.yml"
                     _assert_file_is_yml "$file" || exit 1
                     args_out+=(-f "$file")
@@ -838,11 +851,9 @@ _opencode_args_prepare() {
     # Add network configuration if OPENCODE_NETWORK environment or use custom default
     if [[ "${OPENCODE_NETWORK:-}" == "@default" ]]; then
         # default to using a custom workspace
-        # TODO: Project name conflict - proj name is derived from basename, might have conflicts
         local proj_name
-        proj_name="$(_sanitize_network_name "$PROJECT_NAME")"
-        _network_builder "$proj_name" "$ws_out" || {
-            echo "Failed to create or find network for project: $proj_name" >&2
+        _network_builder "$PROJECT_NAME" "$ws_out" || {
+            echo "Failed to create or find network for project: $PROJECT_NAME" >&2
             return 1
         }
         OPENCODE_NETWORK="$network_name"
@@ -869,7 +880,7 @@ _opencode_args_prepare() {
     # modification inside the container. Set SD_READ_ONLY=false to disable this
     # and mount the workspace without the read-only git override file.
     if [[ "${SD_READ_ONLY,,}" != "false" ]]; then
-        # SECURITY NOTE: all .git directories found within the workspace are mounted
+        # NOTE: all .git directories found within the workspace are mounted
         # read-only, plus the parent git dir when the workspace is a worktree. A
         # future improvement should consider whether to traverse up to the git root
         # directory or leave directories as-is for security isolation.
@@ -885,8 +896,8 @@ _opencode_args_prepare() {
         # the pointer resolves inside the container too.
         if [[ -n "$has_parent" ]]; then
             _assert_maybe_check_outside_root "$has_parent"
-            git_mounts+=("$has_parent:$has_parent")
-            echo "read-only locking worktree parent: $has_parent"
+            git_mounts+=("$has_parent/.git:$has_parent/.git")
+            echo "read-only locking worktree parent: $has_parent/.git"
         fi
 
         if ((${#git_mounts[@]} > 0)); then
@@ -909,6 +920,17 @@ _opencode_args_prepare() {
         _assert_file_is_yml "$cpu_file" || exit 1
         args_out+=(-f "$cpu_file")
         echo "Using CPUS: $OPENCODE_CPUS"
+    fi
+
+    # The backend is only published on a host port when a host-side opencode CLI
+    # (used for the TUI attach) needs to reach it. When opencode is absent the
+    # throwaway `tui` service attaches over the compose network instead, so no
+    # port is exposed on the host: one project's backend then cannot be reached
+    # from another project's host processes when several containers run.
+    if _opencode_on_host; then
+        local port_file="$COMPOSE_SYS_DIR/docker-compose.port.yml"
+        _assert_file_is_yml "$port_file" || exit 1
+        args_out+=(-f "$port_file")
     fi
 
 }
@@ -978,6 +1000,38 @@ _opencode_dispatch() {
     fi
 }
 
+_assert_continue_outside_workspace() {
+    if [[ -z "${OPENCODE_WORKSPACE:-}" ]]; then
+        return 0
+    fi
+    # not within this opencode project
+    local answer=""
+    printf 'Workspace is outside of the environment workspace:\n  %s\n' "$OPENCODE_WORKSPACE"
+    printf 'Running this command will run with this workspaces environment\n'
+    read -r -p "Continue anyway? [y/N] " answer </dev/tty || true
+
+    case ${answer,,} in
+    y | yes) ;;
+    *)
+        printf 'Aborted.\n' >&2
+        exit 1
+        ;;
+    esac
+}
+
+_check_within_workspace() {
+    local ws_out="$1"
+    # Assert the effective workspace is the profile workspace
+    if [[ -n ${OPENCODE_WORKSPACE+x} ]] && [[ "$OPENCODE_WORKSPACE" != "$ws_out" ]]; then
+        # running in a opencode space that is not the current
+        local ws_out_normalized=""
+        if ! _check_valid_within_root "$ws_out" "$OPENCODE_WORKSPACE" ws_out_normalized; then
+            return 1
+        fi
+    fi
+    return 0
+}
+
 # Run a command in the opencode project context.
 # Centralises the setup shared by every command: prepares the Docker Compose
 # args, cd's into the workspace, exports WORKSPACE, and exposes the compose
@@ -989,11 +1043,22 @@ _opencode_ctx() {
     WORKSPACE="$2"
     shift 2
 
+    if ! _check_within_workspace "$WORKSPACE"; then
+        _assert_continue_outside_workspace "$WORKSPACE"
+    fi
+
     # Prepare the compose args and OPENCODE_ARGS in the current shell so the
     # dispatched command and its helpers can use them, then run the command in a
     # subshell so its traps and cwd changes do not leak into the launcher.
     local -a args=()
-    _opencode_args_prepare WORKSPACE args || return 1
+
+    local has_parent
+    _resolve_effective_workspace ws_out has_parent
+    _aseert_sync_worktree "$has_parent" "$ws_out"
+    _opencode_args_prepare "$ws_out" "$has_parent" args || return 1
+
+    WORKSPACE="$ws_out"
+
     cleanup_add _cleanup
 
     OPENCODE_ARGS=("${args[@]}")
@@ -1030,10 +1095,21 @@ _backend_host_port() {
 _backend_healthy() {
     local BACKEND_HEALTH_URL="${BACKEND_ORIGIN:-${OPENCODE_BACKEND_ORIGIN:-}}"
     [[ -n "$BACKEND_HEALTH_URL" ]] || return 1
-    curl -fsS \
-        --connect-timeout 0.2 \
-        --max-time 0.5 \
-        "$BACKEND_HEALTH_URL" >/dev/null 2>&1
+    if _opencode_on_host; then
+        curl -fsS \
+            --connect-timeout 0.2 \
+            --max-time 0.5 \
+            "$BACKEND_HEALTH_URL" >/dev/null 2>&1
+    else
+        # In-container tui: no host port is published, so the host cannot curl
+        # the backend (the compose service name resolves only inside the network).
+        # Probe it from within the container instead.
+        _driver compose "${OPENCODE_ARGS[@]}" exec -T \
+            opencode curl -fsS \
+            --connect-timeout 0.2 \
+            --max-time 0.5 \
+            "$BACKEND_HEALTH_URL" >/dev/null 2>&1
+    fi
 }
 
 # Print the raw ids of the managed opencode containers selected by the given
@@ -1255,8 +1331,17 @@ _find_workspace() {
     printf '%s\n' "$ws"
 }
 
+# True when the opencode CLI is installed on the host: the TUI attaches to the
+# backend over the published host port, which is why the port override file is
+# merged (see _opencode_args_prepare). False when the one-off `tui` service is
+# used instead (opencode absent): the backend is reached over the compose
+# network as http://opencode:4096 and no host port is published.
+_opencode_on_host() {
+    command which opencode >/dev/null 2>&1
+}
+
 _run_opencode_executable() {
-    if command which opencode >/dev/null 2>&1; then
+    if _opencode_on_host; then
         echo "Using opencode tui $(command which opencode)"
         # The backend is published on a random host port; BACKEND_ORIGIN is the
         # resolved `docker compose port opencode 4096` mapping (or a
@@ -1396,12 +1481,15 @@ opencode() {
     # ensure cleanup afterwards
     cleanup_add _cleanup_opencode_backend
 
-    # The backend is served on the container's private port 4096; the host port
-    # is random ("0:4096" in docker-compose.yml), so resolve it back from docker
-    # once. OPENCODE_BACKEND_ORIGIN still overrides the whole origin.
+    # Resolve the backend origin. OPENCODE_BACKEND_ORIGIN always overrides the
+    # whole origin. Otherwise the backend is served on the container's private
+    # port 4096; when a host-side opencode CLI attaches, the port is published
+    # on a random host port ("0:4096" via the port override) which is resolved
+    # back from docker once. When opencode is absent (in-container tui) no host
+    # port is exposed: the backend is reached over the compose network.
     if [[ -n "${OPENCODE_BACKEND_ORIGIN:-}" ]]; then
         BACKEND_ORIGIN="$OPENCODE_BACKEND_ORIGIN"
-    else
+    elif _opencode_on_host; then
         local backend_port
         backend_port="$(_backend_host_port)" || {
             echo "Failed to resolve the published backend port" >&2
@@ -1410,11 +1498,10 @@ opencode() {
         }
         BACKEND_ORIGIN="http://$LOOPBACK:$backend_port"
         echo "Backend: $BACKEND_ORIGIN"
+    else
+        BACKEND_ORIGIN="http://opencode:4096"
+        echo "Backend: $BACKEND_ORIGIN"
     fi
-
-    # TODO: don't expose the port on the host unless required, then one backend
-    # cannot talk to another projects backend, this will be helpfull if multiple
-    # containers are enabled
 
     # start or resuse and existing container for the workspace
     if ! _backend_healthy; then
@@ -1494,8 +1581,6 @@ opencode:shell() {
 opencode:run() {
     echo "Running in opencode project: $PROJECT_NAME ($WORKSPACE)"
 
-    # TODO: Background so it can be canceled
-
     if [ "$#" -gt 0 ]; then
         echo "Running command in the container"
         _opencode_dispatch 0 "$@"
@@ -1561,7 +1646,7 @@ opencode:update() {
 
     # containers must not be started in while update happens, images must be rebuilt
     opencode:stop
-    # TODO: image delete and rebuild only if container has an udpate
+    # TODO: Image delete and rebuild only if container has an update
     opencode:delete --all
 
     # Refresh the repository holding the launcher, compose file, and Dockerfile.
@@ -1591,9 +1676,10 @@ opencode:update() {
 opencode:down() {
     echo "Stopping opencode project: $PROJECT_NAME ($WORKSPACE)"
 
-    local all=0 other=0 quiet=0
+    local all=0 other=0 quiet=0 dry_run=0
     local args=()
-    _opencode_parse_flags all other quiet args "$@"
+    _opencode_parse_flags all other quiet dry_run args "$@"
+    DRY_RUN=$dry_run
 
     # down can only remove the current workspace's project, so "--other" (act on
     # everything except the current workspace) has no coherent meaning here.
@@ -1605,10 +1691,16 @@ opencode:down() {
     # docker compose down does not remove one-off containers created via
     # 'compose run' (like the TUI). Stop any remaining managed containers
     # scoped to this workspace.
-    opencode:stop "$WORKSPACE"
+    local stop_args=("$WORKSPACE")
+    ((DRY_RUN)) && stop_args+=(--dry-run)
+    opencode:stop "${stop_args[@]}"
 
     # Stop and remove containers, networks, and volumes
-    _driver compose "${OPENCODE_ARGS[@]}" down
+    if ((DRY_RUN)); then
+        echo "DRY RUN: docker compose ${OPENCODE_ARGS[*]} down"
+    else
+        _driver compose "${OPENCODE_ARGS[@]}" down
+    fi
 }
 
 # Start the opencode container without running any processes in it.
@@ -1625,9 +1717,6 @@ opencode:up() {
 # Create a new opencode project scaffold with git initialization
 # This function sets up a new project workspace with proper configuration
 # and launches the opencode runner to begin development.
-#
-# TODO: Project name conflict - is derived from basename only, which may cause naming
-# conflicts when different directories share the same final component.
 #
 # For example: /home/user/repos/gists/one and /home/user/repos/projects/one
 # both become project name "one". A future improvement should use a sanitized
@@ -1664,7 +1753,7 @@ Your task is as follows:
 
 "
 
-    # TODO: Implement custom agent and model configuration
+    # FEATURE: Implement custom agent and model configuration
     # Allow users to specify custom agent definitions and model settings
     # for scaffold operations via environment variables or configuration files.
 
@@ -1775,7 +1864,7 @@ Your task is as follows:
     return "$status"
 }
 
-# Remove existing opencode containers before starting a fresh session.
+# Stop existing opencode containers before starting a fresh session.
 opencode:new() {
     opencode:stop
 
@@ -1787,33 +1876,73 @@ opencode:new() {
 # into caller-supplied variables. All four flags are recognised everywhere so
 # the commands behave consistently even if they only act on a subset of them.
 #
-#   _opencode_parse_flags <out_all> <out_other> <out_quiet> <out_args> [args...]
+#   _opencode_parse_flags <out_all> <out_other> <out_quiet> <out_dry_run> <out_args> [args...]
 #
 # Sets (by nameref):
-#   out_all   1 when --all or -a was given, else 0.
-#   out_other 1 when --other or -o was given, else 0.
-#   out_quiet 1 when --quiet or -q was given, else 0.
-#   out_args  The remaining positional arguments, in their original order.
+#   out_all     1 when --all or -a was given, else 0.
+#   out_other   1 when --other or -o was given, else 0.
+#   out_quiet   1 when --quiet or -q was given, else 0.
+#   out_dry_run 1 when --dry-run was given, else 0.
+#   out_args    The remaining positional arguments, in their original order.
 #
-# shellcheck disable=SC2034  # writes go through the nameref parameters
 _opencode_parse_flags() {
     local -n out_all="$1"
     local -n out_other="$2"
     local -n out_quiet="$3"
-    local -n out_args="$4"
-    shift 4
+    local -n out_dry_run="$4"
+    local -n out_args="$5"
+    shift 5
+
     out_all=0
     out_other=0
     out_quiet=0
+    out_dry_run=0
     out_args=()
+
     local arg
+    local parsing_options=1
+
     for arg in "$@"; do
-        case "$arg" in
-        --all | -a) out_all=1 ;;
-        --other | -o) out_other=1 ;;
-        --quiet | -q) out_quiet=1 ;;
-        *) out_args+=("$arg") ;;
-        esac
+        if (( parsing_options )); then
+            case "$arg" in
+                --)
+                    parsing_options=0
+                    continue
+                    ;;
+
+                --all|-a)
+                    out_all=1
+                    ;;
+
+                --other|-o|--others)
+                    out_other=1
+                    ;;
+
+                --quiet|-q)
+                    out_quiet=1
+                    ;;
+
+                --dry-run)
+                    out_dry_run=1
+                    ;;
+
+                --*)
+                    printf 'error: unknown option: %s\n' "$arg" >&2
+                    return 2
+                    ;;
+
+                -*)
+                    printf 'error: unknown option: %s\n' "$arg" >&2
+                    return 2
+                    ;;
+
+                *)
+                    out_args+=("$arg")
+                    ;;
+            esac
+        else
+            out_args+=("$arg")
+        fi
     done
 }
 
@@ -1843,9 +1972,10 @@ _opencode_current_workspace() {
 opencode:stop() {
     echo "Stopping existing opencode containers"
 
-    local all=0 other=0 quiet=0
+    local all=0 other=0 quiet=0 dry_run=0
     local args=()
-    _opencode_parse_flags all other quiet args "$@"
+    _opencode_parse_flags all other quiet dry_run args "$@"
+    DRY_RUN=$dry_run
 
     # First positional argument is the workspace to scope to; empty = all
     # workspaces. A container-id prefix (not an existing directory) is matched
@@ -1894,13 +2024,14 @@ opencode:stop() {
 # Pass --all to include oneoff (throwaway `compose run`) containers.
 # An optional workspace argument scopes the delete to containers for that
 # workspace; by default all workspaces are removed.
-# TODO: delete [cid] then delete --all [cid] does not work
+# NOTE: delete [cid] then delete --all [cid] does not work
 opencode:delete() {
     # also for stop, down
-    local all=0 other=0 quiet=0
+    local all=0 other=0 quiet=0 dry_run=0
     local args=()
     local ws_label
-    _opencode_parse_flags all other quiet args "$@"
+    _opencode_parse_flags all other quiet dry_run args "$@"
+    DRY_RUN=$dry_run
 
     local find_args=(--stopped)
     ((all)) && find_args+=(--all)
@@ -1940,8 +2071,6 @@ opencode:delete() {
         }
     }
 
-    # TODO: how does this work with worktrees
-
     if ((cid_match)); then
         # finds any that match
         local cid="${args[0]}"
@@ -1955,6 +2084,9 @@ opencode:delete() {
         fi
         ws_label="$(_find_workspace "$ids")"
         _ws_remove "$ids" "$ws_label"
+        
+        # set for if --all is given it only acts on this container
+        ws_scope="$ws_label"
     else
         [[ -n "$ws_scope" ]] && find_args+=("$ws_scope")
         local id
@@ -1997,11 +2129,11 @@ opencode:delete() {
             fi
         fi
 
-        # remove the images
+        # remove the workspace image, not the base image
         local filter_images=(
             --filter "label=$LABEL_IMAGE_WORKSPACE"
         )
-        # if a workspace exist, only for that workspace
+        # if a workspace search exists, only for that workspace
         if [[ -n "$ws_scope" ]]; then
             filter_images+=(--filter "label=$LABEL_IMAGE_WORKSPACE=$ws_scope")
         fi
@@ -2042,9 +2174,9 @@ opencode:delete() {
 # they only act on an exact workspace match. Pass --quiet to print only the
 # container ids (one per line), handy for scripting stop/delete.
 opencode:list() {
-    local all=0 other=0 quiet=0
+    local all=0 other=0 quiet=0 dry_run=0
     local args=()
-    _opencode_parse_flags all other quiet args "$@"
+    _opencode_parse_flags all other quiet dry_run args "$@"
 
     # First positional argument is the workspace to scope to; empty = all
     # workspaces.
@@ -2123,10 +2255,10 @@ opencode:list() {
         proj="${fields[3]:--}"
         oneoff="${fields[4]:-}"
         istui="${fields[5]:-false}"
-        if [[ "${oneoff,,}" == "true" ]]; then
-            mode="one off"
-        elif [[ "${istui,,}" == "true" ]]; then
+        if [[ "${istui,,}" == "true" ]]; then
             mode="tui"
+        elif [[ "${oneoff,,}" == "true" ]]; then
+            mode="one off"
         else
             # STATUS mirrors the container's own docker State.Status: a running
             # main container reports "running", a stopped one its own state
@@ -2134,9 +2266,10 @@ opencode:list() {
             # inside it is no longer probed — docker exec per container does not
             # scale. Distinguishing serving vs idle should come from a marker
             # the running process drops once that exists.
-            # TODO: Too heavy of an operation, scales bad, need a better way:
-            # have the running process write a mark under /tmp/sd-opencode so
-            # running instances can be tracked without probing.
+            # NOTE: Rich list info - Too heavy of an operation, scales bad,
+            # need a better way: have the running process write a mark under
+            # /tmp/sd-opencode so running instances can be tracked without
+            # probing.
             mode="main"
         fi
         ids+=("$id")
@@ -2164,6 +2297,8 @@ opencode:list() {
 # then runs `opencode run --agent plan` so it analyses the code and proposes a
 # plan without making any changes. Output streams to the user's terminal.
 opencode:changes() {
+    # TODO: When effective workspace is not the cwd, this might not behave as
+    # expected.
     echo "Analyzing changes for project: $PROJECT_NAME ($WORKSPACE)"
 
     # Run the git analysis against the existing container when it is running,
@@ -2171,7 +2306,7 @@ opencode:changes() {
     # paths (under /workspace) match what opencode sees. Capture the output for
     # feeding into opencode below.
     local changes
-    # TODO: explain the refs used in the diff (from upstream to HEAD etc)
+    # TODO: Explain the refs used in the diff (from upstream to HEAD etc)
     # shellcheck disable=SC2016
     changes="$(_opencode_dispatch 0 \
         sh -c '
@@ -2270,12 +2405,15 @@ $task
 }
 
 opencode:git() {
+    local ws
+    ws="$(_opencode_current_workspace)"
+
     if ((!($# > 0))); then
         echo "Git requires args"
         git --help
     fi
 
-    git -C "$WORKSPACE" "$@"
+    git -C "$ws" "$@"
 }
 
 # Entry point for the bare-name aliases set up inside the interactive workspace
@@ -2291,7 +2429,7 @@ _opencode_shim() {
     # paths) cannot terminate the interactive workspace shell itself.
     case "$cmd" in
     # 'start' is served by the main opencode() function, not opencode:start.
-    start) (opencode "$@") ;; # TODO: Don't think this should be required.
+    start) (opencode "$@") ;;
     *) (opencode:"$cmd" "$@") ;;
     esac
 }
@@ -2331,6 +2469,9 @@ _opencode_dispatch_shims() {
 custom_repl() {
     local ws="$1"
     shift || true
+    if ! _check_within_workspace "$ws"; then
+        _assert_continue_outside_workspace "$ws"
+    fi
 
     # main() sets PROJECT_NAME before dispatching, but keep this self-sufficient
     # so direct calls behave the same as the other commands.
@@ -2339,7 +2480,9 @@ custom_repl() {
     fi
 
     local -a args=()
-    _opencode_args_prepare ws args || return 1
+    local has_parent
+    _resolve_effective_workspace ws has_parent
+    _opencode_args_prepare "$ws" "$has_parent" args || return 1
     cleanup_add _cleanup
 
     OPENCODE_ARGS=("${args[@]}")
@@ -2354,7 +2497,7 @@ custom_repl() {
         launcher_path="$0"
     fi
 
-    # TODO: Should this call the uptree command before entering the repl.
+    # FEATURE: Should this call the uptree command before entering the repl.
     # brining the projects container up first
 
     # Build the interactive shell's rcfile. Contrived values are embedded with
@@ -2462,6 +2605,7 @@ _opencode_help_cmd() {
         echo "                (defaults to the current directory)."
         echo "  '--other'/-o is not accepted here: down only ever removes the current"
         echo "  workspace's project, so it is refused (exit 2)."
+        echo "    --dry-run   Print what would be torn down without doing it."
         ;;
     delete)
         echo "delete [<project>] [--all] [--other]"
@@ -2473,6 +2617,8 @@ _opencode_help_cmd() {
         echo "    --all, -a   Also remove oneoff (throwaway 'compose run') containers."
         echo "    --other, -o Force-remove everything except the current workspace; its"
         echo "                containers, images, and networks are preserved."
+        echo "    --dry-run   Print what would be removed (containers, images, networks)"
+        echo "                without doing it."
         echo "    [project]   The path to the project to scope the delete to."
         ;;
     ls | list)
@@ -2503,6 +2649,7 @@ _opencode_help_cmd() {
         echo "    --all, -a   Also stop oneoff (throwaway 'compose run') containers."
         echo "    --other, -o Stop every managed container except the current workspace's"
         echo "                (and its worktrees)."
+        echo "    --dry-run   Print what would be stopped without doing it."
         echo "    [project]   The path to the project to scope the stop to."
         ;;
     run)
@@ -2537,31 +2684,43 @@ _opencode_help_cmd() {
         echo "    git args...   Any git subcommand and its arguments."
         ;;
     scaffold)
-        echo "scaffold [path] (task) [opencode args...]"
-        echo "  Create a new project using opencode at the path; with a path that does"
-        echo "  not start with /, it defaults to SD_REPO_HOME (default: /home/<user>/repos),"
-        echo "  then runs an interactive opencode scaffolding session."
+        echo "scaffold [--path <name>] [path] (task) [opencode args...]"
+        echo "  Create a new project using opencode at the target, which must be an"
+        echo "  empty or not-yet-existing directory, then runs an interactive opencode"
+        echo "  scaffolding session. With --path the target lives under SD_REPO_HOME"
+        echo "  (default: /home/<user>/repos); otherwise the path is resolved as a real"
+        echo "  path against the current directory ('./x' and 'x' -> \$PWD/x, '/x' -> /x)."
         echo "  If not given a task argument, it will read the task from stdin."
+        echo "  - Unlike start, run, exec commands, a path in some form is required"
         echo "  stdin examples:"
         echo "    echo \"Add a parser for JSON\" | launcher scaffold some-project"
+        echo "    echo \"Add a parser for JSON\" | launcher scaffold --path gists/some-project"
         echo "    launcher scaffold some-project < task.txt"
         echo "  Args:"
-        echo "    path                Project name or './relative/path'. Optional."
+        echo "    --path <name>       Project name under SD_REPO_HOME. Optional."
+        echo "    path                Real path (relative to the cwd) of the new project."
         echo "    task                A description of what opencode should do"
         echo "    opencode args...    Additional arguments forwarded to the opencode CLI."
         ;;
     bg)
-        echo "bg [path] (task) [opencode args...]"
+        echo "bg [--path <name>] [path] (task) [opencode args...]"
         echo "  Run a one-off, non-interactive opencode task against an existing project"
-        echo "  (no empty-directory requirement, unlike scaffold). With a path that does"
-        echo "  not start with /, it defaults to SD_REPO_HOME (default: /home/<user>/repos)."
+        echo "  (). With --path the target lives under SD_REPO_HOME; otherwise the"
+        echo "  path is resolved as a real path against the current directory."
         echo "  Output streams to the terminal while the task runs."
         echo "  If not given a task argument, it will read the task from stdin."
+        echo "  - Unlike start, run, exec commands, a path in some form is required"
+        echo "  - Unlike scaffold the target must already be a directory; it is never"
+        echo "      created"
         echo "  stdin examples:"
         echo "    echo \"Add tests for the api\" | launcher bg some-project"
+        echo "    echo \"Add tests for the api\" | launcher bg --path gists/some-project"
         echo "    launcher bg ./  < task.txt"
+        echo "  task examples:"
+        echo "    launcher bg some-project \"some task\""
         echo "  Args:"
-        echo "    path                Project name or './relative/path'. Optional."
+        echo "    --path <name>       Project name under SD_REPO_HOME. Optional."
+        echo "    path                Real path (relative to the cwd) of the project. Optional."
         echo "    task                A description of what opencode should do"
         echo "    opencode args...    Additional arguments forwarded to the opencode CLI."
         ;;
@@ -2655,6 +2814,9 @@ opencode:help() {
     echo "current workspace. delete --other also preserves the current workspace's"
     echo "images and networks."
     echo
+    echo "stop, delete, and down accept --dry-run to print what would be done"
+    echo "without touching any container, image, or network."
+    echo
     echo "Launcher behaviour is configured by OPENCODE_* and SD_* environment"
     echo "variables (build context, caches, networks, CPU limits, the"
     echo "OPENCODE_WORKSPACE guard, ...); see the project README for details."
@@ -2701,6 +2863,64 @@ opencode:help() {
     fi
 }
 
+# Resolve a scaffold/bg target into an absolute workspace path applying the
+# command's existence policy:
+#
+#   scaffold - the target must be empty or not exist; it is created when
+#              missing, or an existing empty directory is reused.
+#   bg       - the target must be an existing directory; it is never created.
+#
+#   _resolve_project_path <out_ws> <policy> [<path>]
+#
+# <path> is a real path resolved against the cwd, never appended to
+# $SD_REPO_HOME: './' -> $PWD, './x' -> $PWD/x, 'x' -> $PWD/x, '/x' -> /x.
+# --path repo-home targets arrive pre-resolved by the caller as
+# "$SD_REPO_HOME/<name>" (absolute) and pass through untouched. An empty <path>
+# means $PWD. The resolved path is written back through the <out_ws> nameref
+# (named ws_out_ so a same-named caller local cannot swallow it, see
+# _check_valid_within_root). Returns non-zero on the error paths; callers exit 1.
+_resolve_project_path() {
+    local -n ws_out_="$1"
+    local policy="$2"
+    local path="${3:-}"
+    local ws=""
+
+    if [[ -z "$path" ]]; then
+        ws="$PWD"
+    elif [[ "$path" == ./ ]]; then
+        ws="$PWD"
+    elif [[ "$path" == ./* ]]; then
+        ws="$PWD/${path#./}"
+    elif [[ "$path" == /* ]]; then
+        ws="$path"
+    else
+        ws="$PWD/$path"
+    fi
+
+    if [[ "$policy" == "bg" ]]; then
+        if [[ ! -d "$ws" ]]; then
+            echo "bg requires an existing directory: $ws" >&2
+            return 1
+        fi
+        echo "Using existing directory: $ws"
+        ws_out_="$ws"
+        return 0
+    fi
+
+    # scaffold: empty-or-create
+    if [[ -e "$ws" || -L "$ws" ]]; then
+        if [[ ! -d "$ws" ]]; then
+            echo "Path already exists but is not a directory: $ws" >&2
+            return 1
+        fi
+        echo "Using existing empty directory: $ws"
+    else
+        echo "Creating $ws"
+        mkdir -p -- "$ws" || return 1
+    fi
+    ws_out_="$ws"
+}
+
 # Main entry point for the opencode launcher script
 # This function parses command-line arguments and dispatches to the
 # appropriate handler function based on the specified command.
@@ -2727,20 +2947,6 @@ main() {
     fi
 
     # Just exit if there is no docker
-    if [[ "$cmd" == "down" ]]; then
-        # down only ever removes the current workspace's project: --other has no
-        # coherent meaning, so refuse it before touching docker at all.
-        local arg
-        for arg in "$@"; do
-            case "$arg" in
-            --other | --other=* | -o)
-                echo "error: --other cannot be combined with down: it only removes the current workspace's project" >&2
-                exit 2
-                ;;
-            esac
-        done
-    fi
-
     if ! _driver info >/dev/null 2>&1; then
         echo "Docker daemon is not running" >&2
         echo "Try something like: sudo systemctl start docker"
@@ -2767,6 +2973,10 @@ main() {
         opencode:list "$@"
         return 0
         ;;
+    git)
+        opencode:git "$@"
+        return 0
+        ;;
     esac
 
     # Get the workspace directory from arguments or current directory
@@ -2776,111 +2986,76 @@ main() {
 
     case "$cmd" in
     scaffold)
-        # require a task argument when stdin is a terminal (nothing can be piped in)
-        if [ ! -t 0 ] && [[ $# -lt 1 ]]; then
-            # if pipe, and no task
+        # Target: a leading --path <name> (a project name under $SD_REPO_HOME),
+        # else the leading positional resolved as a real path against the cwd,
+        # else the current directory. Remaining positionals are the task and
+        # opencode args. scaffold requires the target to be empty or not exist.
+        local path_arg=""
+        if [[ "${1:-}" == "--path" ]]; then
+            [[ $# -ge 2 ]] || {
+                echo "error: --path requires a project name" >&2
+                exit 1
+            }
+            path_arg="${SD_REPO_HOME}/${2}"
+            shift 2
+        fi
+        if [[ -z "$path_arg" && $# -ge 1 ]]; then
+            path_arg="$1"
+            shift
+        fi
+
+        if [[ ! -t 0 && -z "$path_arg" ]]; then
             echo "You did not provide a task to scaffold." >&2
             exit 1
         fi
-        if [ -t 0 ] && [[ $# -lt 2 ]]; then
-            # if not pipe, and missing argument
-            echo "You did not provide a path to scaffold." >&2
-            exit 1
-        fi
-
-        if [[ -z ${1+x} ]]; then
-            # No project name: the current directory must be empty.
-            if [[ -n $(find "$ws_out" -mindepth 1 -print -quit) ]]; then
-                echo "$ws_out is not empty, scaffold failed" >&2
+        if [[ -t 0 ]]; then
+            if [[ -z "$path_arg" ]]; then
+                echo "You did not provide a path to scaffold." >&2
                 exit 1
             fi
-        else
-            # Resolve the project name to an absolute workspace path.
-            local name="$path_in"
-            if [[ "$name" == ./ ]]; then
-                # "./" alone means the current directory itself
-                ws_out="$PWD"
-            elif [[ "$name" == ./* ]]; then
-                # relative to the current directory
-                ws_out="$PWD/${name#./}"
-            elif [[ "$name" == /* ]]; then
-                # absolute path
-                ws_out="$name"
-            else
-                # under the SD_REPO_HOME root
-                ws_out="${SD_REPO_HOME}/$name"
+            if (($# == 0)); then
+                echo "You did not provide a task to scaffold." >&2
+                exit 1
             fi
-            shift
-
-            # An absolute path is used as-is: no emptiness check, the caller owns it.
-            # repo-home paths must target a new or empty directory.
-            local check_empty=1
-            [[ "$name" == /* || "$name" == ./* ]] && check_empty=0
-
-            if [[ -e "$ws_out" || -L "$ws_out" ]]; then
-                if [[ ! -d "$ws_out" ]]; then
-                    echo "Path already exists but is not a directory: $ws_out" >&2
-                    exit 1
-                elif ((check_empty)) && [[ -n $(find "$ws_out" -mindepth 1 -print -quit) ]]; then
-                    echo "$ws_out is not empty; scaffold failed" >&2
-                    exit 1
-                elif ((check_empty)); then
-                    echo "Using existing empty directory: $ws_out"
-                else
-                    echo "Using existing directory: $ws_out"
-                fi
-            else
-                echo "Creating $ws_out"
-                mkdir -p -- "$ws_out" || exit 1
-            fi
-            ws_out="$(cd -- "$ws_out" && pwd)"
         fi
+
+        _resolve_project_path ws_out scaffold "$path_arg" || exit 1
         ;;
     bg)
-        # require a task argument when stdin is a terminal (nothing can be piped in)
-        if [ ! -t 0 ] && [[ $# -lt 1 ]]; then
+        # Same target resolution as scaffold: --path <name> under $SD_REPO_HOME,
+        # else the leading positional as a real path, else the current directory.
+        # Unlike scaffold, bg runs against an existing project: the target must
+        # already be a directory, it is never created.
+        local path_arg=""
+        if [[ "${1:-}" == "--path" ]]; then
+            [[ $# -ge 2 ]] || {
+                echo "error: --path requires a project prefix" >&2
+                exit 1
+            }
+            path_arg="${SD_REPO_HOME}/${2}"
+            shift 2
+        fi
+        if [[ -z "$path_arg" && $# -ge 1 ]]; then
+            path_arg="$1"
+            shift
+        fi
+
+        if [[ ! -t 0 && -z "$path_arg" ]]; then
             echo "You did not provide a path to bg." >&2
             exit 1
-        elif [ -t 0 ] && [[ $# -lt 2 ]]; then
-            echo "You did not provide a task to bg." >&2
-            exit 1
+        fi
+        if [[ -t 0 ]]; then
+            if [[ -z "$path_arg" ]]; then
+                echo "You did not provide a path to bg." >&2
+                exit 1
+            fi
+            if (($# == 0)); then
+                echo "You did not provide a task to bg." >&2
+                exit 1
+            fi
         fi
 
-        # if one arguemnt, and its not a directory, it must be a task
-        # can we use the workspace?
-
-        if [[ -n ${1+x} ]]; then
-            # Resolve the project name to an absolute workspace path. Unlike scaffold,
-            # there is no empty-directory requirement: bg runs against an existing
-            # project (possibly the current directory) that may already contain code.
-            local name="$path_in"
-            if [[ "$name" == ./ ]]; then
-                # "./" alone means the current directory itself
-                ws_out="$PWD"
-            elif [[ "$name" == ./* ]]; then
-                # relative to the current directory
-                ws_out="$PWD/${name#./}"
-            elif [[ "$name" == /* ]]; then
-                # absolute path
-                ws_out="$name"
-            else
-                # under the SD_REPO_HOME root
-                ws_out="${SD_REPO_HOME}/$name"
-            fi
-            shift
-
-            if [[ -e "$ws_out" || -L "$ws_out" ]]; then
-                if [[ ! -d "$ws_out" ]]; then
-                    echo "Path already exists but is not a directory: $ws_out" >&2
-                    exit 1
-                fi
-                echo "Using existing directory: $ws_out"
-            else
-                echo "Creating $ws_out"
-                mkdir -p -- "$ws_out" || exit 1
-            fi
-            ws_out="$(cd -- "$ws_out" && pwd)"
-        fi
+        _resolve_project_path ws_out bg "$path_arg" || exit 1
         ;;
     esac
 
@@ -2895,13 +3070,18 @@ main() {
         fi
     fi
 
+    # NOTE: if the container is already started, no need to assert. However, I
+    # don't want to call docker again to check
+    #
     # Skip this check when SD_YOLO is set to "true" (case-insensitive).
     # Check if the workspace lies outside of a sub directory of $HOME.
-    # TODO: if the container is already started, no need to assert
     _assert_maybe_check_outside_root "$ws_out"
 
+    # TODO: Project name conflict - is derived from basename only, which may cause naming
+    # conflicts when different directories share the same final component.
+    #
     # Set up compose directory and project name
-    PROJECT_NAME="$(basename "$ws_out")"
+    PROJECT_NAME="$(_sanitize_name "$(basename "$ws_out")")"
     echo "Starting workspace: $ws_out"
     echo "Starting project: $PROJECT_NAME"
 
@@ -2927,10 +3107,10 @@ main() {
         _opencode_ctx opencode:up "$ws_out" "$@"
         ;;
     uptree)
-        # TODO: docker ps --filter opencode.parent, if a worktree exists
-        # for this start it, instead of the current dir, if none exists
-        # then normal up. If more than on parent match is found, then
-        # not sure what we can do. warnn....
+        # TODO: docker ps --filter opencode.parent, if a worktree exists for
+        # this start it, instead of the current dir, if none exists then normal
+        # up. If more than on parent match is found, then not sure what we can
+        # do. warnn....
         echo "Command not implemented"
         ;;
     scaffold)
@@ -2957,19 +3137,16 @@ main() {
         _opencode_ctx opencode:bg "$ws_out" "$@"
         ;;
     security)
-        # TODO: Implement command to analyze repository security Should read code
+        # FEATURE: Implement command to analyze repository security Should read code
         # files and check for executable commands in normal usage For example,
         # checking for npm pre-install scripts or other potential risks
         echo "command not implemented"
         ;;
     clone)
-        # TODO: Implement commadn to retrieve a git repository and clone it into a
+        # FEATURE: Implement commadn to retrieve a git repository and clone it into a
         # location clone --check runs security, then perform come action or check
         # if it already exists and preform some action
         echo "command not implemented"
-        ;;
-    git)
-        _opencode_ctx opencode:git "$ws_out" "$@"
         ;;
     repl)
         custom_repl "$ws_out"

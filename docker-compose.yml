@@ -29,10 +29,6 @@ services:
             - ${OPENCODE_DATA_DIR:-${HOME}/.local/share/opencode}:/home/other/.local/share/opencode
             - ${OPENCODE_CONFIG_DIR:-${HOME}/.config/opencode}:/home/other/.config/opencode
             - ${SD_OPENCODE}/opencode/agent.md:/home/other/.config/opencode/AGENTS.md:ro
-        ports:
-            # Publish on a random host port; query the assigned port with
-            # `opencode:compose port opencode 4096` when attaching to the backend.
-            - "0:4096"
 
     # only run as one off
     tui:

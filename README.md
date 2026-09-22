@@ -54,7 +54,10 @@ opencode:exec /home/other/somerepo sh
 opencode:down /home/other/somerepo
 opencode:delete "$(pwd)" --all
 opencode:scaffold /home/pi/repos/gists/project-1 "Create basic hello world html project"
-opencode:scaffold gists/project-1 "Create basic hello world html project"
+
+# --path <path> is appended as a suffix to $SD_REPO_HOME
+opencode:scaffold --path gists/project-1 "Create basic hello world html project"
+
 opencode:scaffold project-2 "$(cat /tmp/sometask.md)"
 
 mkdir "$HOME/repos/gists/gotester" && cd "$HOME/repos/gists/gotester"
@@ -82,6 +85,7 @@ opencode:git status # in the worktree
 
 ## Features
 
+- [x] Add --dry-run
 - [x] Security: Prevent potential destructive actions by the agent
 - [x] Security: Configure project isolated cache storage via environment
     variables
@@ -115,6 +119,11 @@ opencode:git status # in the worktree
 - [ ] Project creation with scaffold extra context
 - [ ] Control `--session` per workspace (blocked on opencode v1)
 - [ ] Not running docker-compose from sd-opencode?
+- [ ] Proper argument and option parsing
+- [ ] Agent file needs to change per workspace includes
+- [ ] Command that mounts the entire dir as readonly, and mounts a single file
+  as writeable so you can plan and write to a file. then run on the plan.
+  opencode:io --output /tmp/out.md < /tmp/create-task-plan.md
 
 ## Install
 
@@ -143,10 +152,14 @@ unless `OPENCODE_IMAGE_URL` points at a prebuilt image. Run `opencode:update`
 When `opencode` (the `start` command) runs, the launcher starts an `opencode
 serve` backend inside the container, waits until it is healthy, and then
 attaches a TUI to it — using a host `opencode` binary if one is on the `PATH`,
-otherwise the one-off `tui` compose service. The old backend is killed when the
-TUI exits. `scaffold` and `bg` always run in a throwaway one-off container;
-`run`, `changes`, and `setup` run in the running container when present,
-otherwise in a throwaway `compose run` container.
+otherwise the one-off `tui` compose service. The backend port is only published
+on the host when a host `opencode` binary attaches (see
+`OPENCODE_BACKEND_ORIGIN` below); with the in-container `tui` service the
+backend stays reachable only on the compose network, so one project's backend
+cannot be reached from another project's host processes. The old backend is
+killed when the TUI exits. `scaffold` and `bg` always run in a throwaway one-off
+container; `run`, `changes`, and `setup` run in the running container when
+present, otherwise in a throwaway `compose run` container.
 
 ## oh-my-zsh plugin
 
@@ -307,7 +320,7 @@ These variables are read by `scripts/launcher.sh` from the shell environment
 | `OPENCODE_COMPOSE`         | –                          | Space-separated extra `docker compose` files, merged into the project via `-f` |
 | `OPENCODE_WORKSPACE`       | –                          | The current opencode workspace context; launches targeting a directory outside it prompt before using its environment |
 | `OPENCODE_CACHE`           | –                          | Toolchain cache mounts to enable: `false` (default) none, `all` every cache, or space-separated ids (`go`, `node`, `python`, `rust`) |
-| `OPENCODE_BACKEND_ORIGIN`  | resolved from `compose port` | Backend URL used for the health check and TUI attach |
+| `OPENCODE_BACKEND_ORIGIN`  | `http://opencode:4096`, else resolved from `compose port` | Backend URL used for the health check and TUI attach |
 | `OPENCODE_CPUSET`          | –                          | CPU pinning (e.g. `2-3`); unset by default (Docker uses all CPUs) |
 | `OPENCODE_CPUS`            | –                          | CPU limit (e.g. `2`); unset by default (no quota)    |
 | `SD_YOLO`                  | –                          | `true` (case-insensitive) skips the outside-`HOME` workspace check |
@@ -348,12 +361,15 @@ Details:
     be mounted by default and are now opt-in, because cached toolchain artifacts
     are executed inside the container. Example:
     `export OPENCODE_CACHE="go rust"`.
-- `OPENCODE_BACKEND_ORIGIN` — `docker-compose.yml` publishes the backend on a
-    random host port (`"0:4096"`). The launcher resolves the assigned mapping with
-    `opencode:compose port opencode 4096` and uses `http://127.0.0.1:<that port>`
-    for the health check and TUI attach; setting this variable overrides the whole
-    origin. The throwaway `tui` container instead uses `http://opencode:4096`, the
-    in-network service name and port.
+- `OPENCODE_BACKEND_ORIGIN` — by default no host port is exposed: the backend
+    serves on the compose network as `http://opencode:4096`, which the
+    throwaway `tui` container attaches to. When a host `opencode` binary is on
+    the `PATH` the launcher instead merges the static override
+    `compose/sys/docker-compose.port.yml`, which publishes the backend on a
+    random host port (`"127.0.0.1:0:4096"`); it resolves the assigned mapping
+    with `opencode:compose port opencode 4096` and uses
+    `http://127.0.0.1:<that port>` for the health check and TUI attach. Setting
+    this variable overrides the whole origin.
 - `OPENCODE_CPUSET` / `OPENCODE_CPUS` — control the CPU resources available to
     the `opencode` service. Both default to unset, which leaves Docker's
     defaults (no pinning, no quota). `OPENCODE_CPUSET` pins the container to

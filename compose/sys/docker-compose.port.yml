@@ -1,0 +1,11 @@
+services:
+    opencode:
+        # Publish the backend on a random host port; query the assigned port with
+        # `opencode:compose port opencode 4096` when attaching to the backend.
+        # Merged only when a host-side `opencode` CLI attaches to the backend (see
+        # scripts/launcher.sh `_opencode_on_host`). The one-off `tui` service
+        # reaches the backend over the compose network instead, so no host port is
+        # exposed unless a host TUI attaches; this keeps one project's backend from
+        # being reachable from another project's host processes.
+        ports:
+            - "127.0.0.1:0:4096"

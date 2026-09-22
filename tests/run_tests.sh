@@ -30,9 +30,13 @@ make_sandbox() {
     SD="$(mktemp -d "${TMPDIR:-/tmp}/opencode-tests.XXXXXX")"
     mkdir -p "$SD/compose" "$SD/compose/compose/vol" "$SD/compose/compose/net" "$SD/compose/compose/sys" "$SD/ws/.git"
     echo 'services: { opencode: {} }' >"$SD/compose/docker-compose.yml"
+    # The port override is always merged in these tests because the mocked
+    # opencode CLI is on PATH (a host-side TUI attach requires the published
+    # host port; see _opencode_on_host in the launcher).
+    echo 'services: { opencode: {} }' >"$SD/compose/compose/sys/docker-compose.port.yml"
     # Compose base args used in every expected command (git mount is pruned by
     # mktemp normalisation).
-    CBASE="docker compose -p ws -f $SD/compose/docker-compose.yml -f <tmp>/docker-compose.git.yml"
+    CBASE="docker compose -p ws -f $SD/compose/docker-compose.yml -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.port.yml"
     # Every launcher execution begins with the docker daemon reachability check.
     DINFO="docker info"
     # _opencode_args_prepare probes for worktree-child containers of the workspace
@@ -249,7 +253,7 @@ t_compose_no_readonly() {
     run_launcher "$dotfile" compose config --services
     assert_docker "$DINFO
 $CPARENTPS
-docker compose -p ws -f $SD/compose/docker-compose.yml config --services"
+docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
     assert_launcher_output_contains "Running Docker Compose for project: ws"
     unset SD_READ_ONLY
 }
@@ -317,7 +321,7 @@ t_cache_all() {
     run_launcher "$dotfile" compose config --services
     assert_docker "$DINFO
 $CPARENTPS
-docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/vol/docker-compose.cache.yml -f <tmp>/docker-compose.git.yml config --services"
+docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/vol/docker-compose.cache.yml -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
     unset OPENCODE_CACHE
 }
 
@@ -330,7 +334,7 @@ t_cache_ids() {
     run_launcher "$dotfile" compose config --services
     assert_docker "$DINFO
 $CPARENTPS
-docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/vol/docker-compose.go.yml -f $SD/compose/compose/vol/docker-compose.python.yml -f <tmp>/docker-compose.git.yml config --services"
+docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/vol/docker-compose.go.yml -f $SD/compose/compose/vol/docker-compose.python.yml -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
     unset OPENCODE_CACHE
 }
 
@@ -372,7 +376,7 @@ t_cpu_cpuset() {
     run_launcher "$dotfile" compose config --services
     assert_docker "$DINFO
 $CPARENTPS
-docker compose -p ws -f $SD/compose/docker-compose.yml -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.cpuset.yml config --services"
+docker compose -p ws -f $SD/compose/docker-compose.yml -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.cpuset.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
     assert_launcher_output_contains "Using CPUSET: 2-3"
     unset OPENCODE_CPUSET
 }
@@ -385,7 +389,7 @@ t_cpu_cpus() {
     run_launcher "$dotfile" compose config --services
     assert_docker "$DINFO
 $CPARENTPS
-docker compose -p ws -f $SD/compose/docker-compose.yml -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.cpus.yml config --services"
+docker compose -p ws -f $SD/compose/docker-compose.yml -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.cpus.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
     assert_launcher_output_contains "Using CPUS: 2"
     unset OPENCODE_CPUS
 }
@@ -399,7 +403,7 @@ t_cpu_both() {
     run_launcher "$dotfile" compose config --services
     assert_docker "$DINFO
 $CPARENTPS
-docker compose -p ws -f $SD/compose/docker-compose.yml -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.cpuset.yml -f $SD/compose/compose/sys/docker-compose.cpus.yml config --services"
+docker compose -p ws -f $SD/compose/docker-compose.yml -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.cpuset.yml -f $SD/compose/compose/sys/docker-compose.cpus.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
     assert_launcher_output_contains "Using CPUSET: 2-3"
     assert_launcher_output_contains "Using CPUS: 2"
     unset OPENCODE_CPUSET OPENCODE_CPUS
@@ -504,6 +508,62 @@ t_start_build_fail() {
     fi
 }
 
+t_start_no_host_tui() {
+    # Without a host opencode CLI the throwaway `tui` service attaches to the
+    # backend over the compose network: the port override is NOT merged, no host
+    # port is published or resolved, and the backend health check runs from
+    # inside the container (the host cannot reach the compose service name).
+    # Hide opencode from PATH (drop every dir containing one) while keeping the
+    # mocked docker/curl, so _opencode_on_host reports false.
+    local tbin="$SD/tbin"
+    mkdir -p "$tbin"
+    cp "$MOCKBIN/docker" "$tbin/docker"
+    cp "$MOCKBIN/curl" "$tbin/curl"
+    chmod +x "$tbin/docker" "$tbin/curl"
+
+    local new_path="" dir
+    local -a dirs
+    IFS=: read -r -a dirs <<<"$PATH"
+    for dir in "${dirs[@]}"; do
+        [[ -n "$dir" && ! -x "$dir/opencode" ]] && new_path+=":$dir"
+    done
+
+    : >"$SD/docker.log"
+    local out
+    out="$(cd "$SD/ws" && PATH="$tbin$new_path" \
+        OPENCODE_TEST_DOCKER_LOG="$SD/docker.log" \
+        SD_OPENCODE="$SD/compose" SD_REPO_HOME="$SD/repos" SD_YOLO=true \
+        bash "$LAUNCHER" start --model gpt </dev/null 2>&1)"
+    LAUNCH_RC=$?
+    LAUNCH_OUT="$(printf '%s\n' "$out" | grep -v '^mocked:')"
+    DOCKER_LOG="$(sed -E \
+        -e 's#-f [^ ]*docker-compose\.git\.yml#-f <tmp>/docker-compose.git.yml#g' \
+        "$SD/docker.log")"
+
+    # The compose args must NOT include the port override.
+    local cbase_no_port="docker compose -p ws -f $SD/compose/docker-compose.yml -f <tmp>/docker-compose.git.yml"
+    assert_docker_contains "$cbase_no_port up -d opencode"
+    assert_docker_contains "$cbase_no_port exec -T opencode curl -fsS"
+    assert_docker_contains "$cbase_no_port run --rm --remove-orphans tui attach http://opencode:4096 --model gpt"
+    assert_launcher_output_contains "Backend: http://opencode:4096"
+    if grep -Fq "docker-compose.port.yml" <<<"$DOCKER_LOG"; then
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$CURRENT:no_override")
+        echo "  FAIL: port override merged without a host opencode CLI"
+    else
+        PASS=$((PASS + 1))
+        echo "  ok: port override not merged with the in-container tui"
+    fi
+    if grep -Fq "port opencode 4096" <<<"$DOCKER_LOG"; then
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$CURRENT:no_port")
+        echo "  FAIL: resolved a host port without a host opencode CLI"
+    else
+        PASS=$((PASS + 1))
+        echo "  ok: no host port resolved with the in-container tui"
+    fi
+}
+
 t_shell() {
     # shell is a convenience alias for 'exec sh ...' in main().
     run_launcher /dev/null shell -c 'echo hi'
@@ -525,7 +585,8 @@ t_down() {
 t_down_refuses_other() {
     # down can only remove the current workspace's project, so the --other flag
     # (act on everything except the current workspace) has no coherent meaning
-    # and must be refused without touching docker.
+    # and is refused once opencode:down parses its flags. Only the docker probe
+    # and worktree-child discovery run first; nothing may actually be downed.
     local dotfile="$SD/down-other.env"
     : >"$dotfile"
     run_launcher "$dotfile" down --other
@@ -539,8 +600,9 @@ t_down_refuses_other() {
         echo "  FAIL: down --other should exit 2 with a refusal message"
         printf '  rc=%s out=%s\n' "$LAUNCH_RC" "$LAUNCH_OUT" | sed 's/^/    /'
     fi
-    # Refuse before even probing docker: nothing may be downed.
-    assert_docker ""
+    # Nothing is downed: no compose down/stop reach docker.
+    assert_docker "$DINFO
+$CPARENTPS"
 }
 
 t_delete() {
@@ -743,15 +805,26 @@ t_changes_nocontainer() {
 
 t_scaffold() {
     # scaffold expects an empty workspace; the sandbox ws is not empty, so use a
-    # named new project in the repo home (mirrors main()'s scaffold path).
+    # --path project name in the repo home, which is created (empty) for us.
     local name="proj-scaffold"
     mkdir -p "$SD/repos"
-    run_launcher /dev/null scaffold "$name" "test task"
+    run_launcher /dev/null scaffold --path "$name" "test task"
     # The one-off compose run uses the scaffold container name and --auto, then
     # the cleanup removes the container by name.
     assert_docker_contains "oc-scaffold-<pid> opencode exec"
     assert_docker_contains "opencode --auto"
     assert_docker_contains "docker rm -f -v oc-scaffold-<pid>"
+    assert_launcher_output_contains "Creating $SD/repos/proj-scaffold"
+    assert_launcher_output_contains "Running on opencode project: proj-scaffold"
+}
+
+t_scaffold_path() {
+    # Without --path the positional is a real path resolved against the cwd:
+    # './proj' scaffolds (creates) $PWD/proj.
+    run_launcher /dev/null scaffold ./proj-scaffold "test task"
+    assert_docker_contains "oc-scaffold-<pid> opencode exec"
+    assert_docker_contains "docker rm -f -v oc-scaffold-<pid>"
+    assert_launcher_output_contains "Creating $SD/ws/proj-scaffold"
     assert_launcher_output_contains "Running on opencode project: proj-scaffold"
 }
 
@@ -766,17 +839,45 @@ t_bg() {
     assert_docker_contains "oc-bg-<pid> opencode exec"
     assert_docker_contains "opencode --auto"
     assert_docker_contains "docker rm -f -v oc-bg-<pid>"
+    assert_launcher_output_contains "Using existing directory: $SD/ws"
     assert_launcher_output_contains "Running background task on opencode project: ws"
 }
 
 t_bg_path() {
-    # A relative project name resolves under SD_REPO_HOME and is created (not
-    # empty-dir checked), mirroring scaffold's path handling.
-    mkdir -p "$SD/repos"
-    run_launcher /dev/null bg proj-bg "test task"
+    # --path targets an existing project under SD_REPO_HOME. bg never creates the
+    # directory (unlike scaffold), so it must already exist.
+    mkdir -p "$SD/repos/proj-bg"
+    run_launcher /dev/null bg --path proj-bg "test task"
     assert_docker_contains "oc-bg-<pid> opencode exec"
     assert_docker_contains "docker rm -f -v oc-bg-<pid>"
+    assert_launcher_output_contains "Using existing directory: $SD/repos/proj-bg"
     assert_launcher_output_contains "Running background task on opencode project: proj-bg"
+}
+
+t_bg_missing() {
+    # bg never creates its target: a missing directory aborts before any
+    # container work (beyond the docker daemon info check).
+    local rc=0
+    run_launcher /dev/null bg ./missing "test task"
+    rc=$LAUNCH_RC
+    assert_launcher_output_contains "bg requires an existing directory: $SD/ws/missing"
+    if [[ "$rc" -eq 0 ]]; then
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$CURRENT:exit")
+        echo "  FAIL: bg did not exit non-zero for a missing directory"
+    else
+        PASS=$((PASS + 1))
+        echo "  ok: bg exits non-zero for a missing directory"
+    fi
+    # No container was run or created.
+    if grep -Fq "oc-bg-" <<<"$DOCKER_LOG"; then
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$CURRENT:no_container")
+        echo "  FAIL: bg ran a container despite a missing directory"
+    else
+        PASS=$((PASS + 1))
+        echo "  ok: no bg container started for a missing directory"
+    fi
 }
 
 t_help() {
@@ -948,6 +1049,52 @@ SCRIPT
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$CURRENT:validate")
         echo "  FAIL: _check_valid_within_root validation contract"
+        printf '%s\n' "$out" | sed 's/^/    /'
+    fi
+}
+
+t_workspace_guard() {
+    # Unit test for the _check_within_workspace contract behind the
+    # OPENCODE_WORKSPACE guard: the target workspace is within reach when the
+    # environment workspace is unset, equals the target, or the target is one
+    # of its subdirectories; anything outside (a sibling) is rejected. Sourcing
+    # the launcher reuses the real function without docker or a terminal.
+    cat >"$SD/guard.sh" <<'SCRIPT'
+set +e
+source "$LAUNCHER"
+set +e
+pass=1
+
+env_ws="$SD_GUARD/env"
+target_ws="$SD_GUARD/target"
+
+# No environment workspace: no guard applies.
+unset OPENCODE_WORKSPACE
+_check_within_workspace "$target_ws" || { echo "FAIL: unset env should be within"; pass=0; }
+
+# Target equals the environment workspace -> within.
+OPENCODE_WORKSPACE="$target_ws"
+_check_within_workspace "$target_ws" || { echo "FAIL: equal target rejected"; pass=0; }
+
+# Target is a subdirectory of the environment workspace -> within.
+_check_within_workspace "$target_ws/sub" || { echo "FAIL: subdirectory rejected"; pass=0; }
+_check_within_workspace "$target_ws/sub/deep" || { echo "FAIL: deep subdirectory rejected"; pass=0; }
+
+# Target outside the environment workspace (a sibling) -> rejected.
+_check_within_workspace "$env_ws" && { echo "FAIL: sibling accepted"; pass=0; }
+
+((pass)) && echo "workspace_guard ok" || echo "workspace_guard FAIL"
+SCRIPT
+    local out
+    out="$(PATH="$MOCKBIN:$PATH" LAUNCHER="$LAUNCHER" \
+        SD_GUARD="$SD" bash "$SD/guard.sh")"
+    if grep -Fq "workspace_guard ok" <<<"$out"; then
+        PASS=$((PASS + 1))
+        echo "  ok: OPENCODE_WORKSPACE guard contract"
+    else
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$CURRENT:guard")
+        echo "  FAIL: OPENCODE_WORKSPACE guard contract"
         printf '%s\n' "$out" | sed 's/^/    /'
     fi
 }
