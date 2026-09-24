@@ -43,6 +43,8 @@ OPENCODE_CPUS="${OPENCODE_CPUS:-}"
 # (see _opencode_args_prepare).
 SD_READ_ONLY="${SD_READ_ONLY:-true}"
 
+CONTAINER_WORKSPACE_ROOT="/workspace"
+
 IMAGE_URL="${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker:latest}"
 
 if [[ -f "${OPENCODE_DOCKERFILE:-}" ]] && [[ -z "${OPENCODE_CONTEXT:-}" ]]; then
@@ -519,7 +521,7 @@ _check_valid_within_root() {
             $ws_norm == /* ]]; then
             valid_subdir=1
         fi
-    elif [[ $ws_norm == "$home"/* ]]; then
+    elif [[ $ws_norm == "$home" || $ws_norm == "$home"/* ]]; then
         # The "$home/*" pattern excludes "$home" itself.
         valid_subdir=1
     fi
@@ -598,7 +600,7 @@ _find_workspace_git_dirs() {
 # Print the parent repository's git dir when <git_path> is a worktree .git file,
 # or nothing when it is a regular git dir directory. A worktree's .git is a file
 # whose first line is "gitdir: <path>", pointing into <parent>/.git/worktrees/
-# <name>; stripping the worktrees/<name> suffix yields the parent's git dir.
+# <name>
 _git_worktree_parent() {
     local git_path="$1"
     local gitdir parent
@@ -606,6 +608,7 @@ _git_worktree_parent() {
     gitdir="$(sed -n 's/^gitdir: //p' "$git_path")"
     [[ -n "$gitdir" ]] || return 0
     parent="${gitdir%/worktrees/*}"
+    parent="${parent%/.git}"
     [[ -d "$parent" ]] || return 0
     printf '%s' "$parent"
 }
@@ -681,26 +684,26 @@ _write_labels_override() {
 # opencode:up /path/to/repo-wt
 #
 # FEATURE: Support `--worktree <branch>` / `--wt <branch>` to create or reuse
-# a worktree at:
-# $HOME/.local/state/repo/<branch>
+#   a worktree at:
+#   $HOME/.local/state/repo/<branch>
+#
 # NOTE: could search only up containers which would enable multiple active
-# worktrees - at least take precedent from up containers However, it would mean
-# that the behaviour is unpredictable
+#   worktrees - at least take precedent from up containers However, it would mean
+#   that the behaviour is unpredictable
+#
 # NOTE: When both a child and a parent are up? If `up` is called from the
-# parent, the parent will open the child; if called from the child, it will
-# open the child.
+#   parent, the parent will open the child; if called from the child, it will
+#   open the child.
 _resolve_effective_workspace() {
     local -n w="$1"
     local -n hp="$2"
 
-    local parent_workspace
-    hp="$(_git_worktree_parent "$w/.git")"
-    hp="${hp%/.git}"
+    parent_workspace="$(_git_worktree_parent "$w/.git")"
     
-    # TODO: When a path parent is given for a parent, but a existing child
-    #   is already up, it does not respect the path
+    # TODO: When a path is given for a parent, but a existing child is already
+    # up, it does not respect the path
 
-    if [[ -z "$hp" ]] && command -v git >/dev/null 2>&1; then
+    if [[ -z "$parent_workspace" ]] && command -v git >/dev/null 2>&1; then
         # for parent, find worktree child and use its path as effective
         local -a children
         mapfile -t children < <(_select_managed_containers --stopped --parent "$w")
@@ -724,6 +727,8 @@ _resolve_effective_workspace() {
             PROJECT_NAME="$eff_proj"
             hp="$parent_workspace"
         fi
+    else
+        hp="$parent_workspace"
     fi
 }
 
@@ -887,16 +892,18 @@ _opencode_args_prepare() {
         local -a git_mounts=()
         local git_dir
         while IFS= read -r -d '' git_dir; do
-            git_mounts+=("$git_dir:/workspace/${git_dir#"$ws_out"/}")
+            git_mounts+=("$git_dir:$CONTAINER_WORKSPACE_ROOT/${git_dir#"$ws_out"/}")
             echo "read-only locking dir: $git_dir"
         done < <(_find_workspace_git_dirs "$ws_out")
 
         # A worktree's .git is a file whose gitdir pointer lives in the parent
-        # repository. Mount the parent git dir read-only at its own host path so
-        # the pointer resolves inside the container too.
+        # repository. Mount the parent git dir read-only at its own host path
+        # so the pointer resolves inside the container too. ALso protect the
+        # pointer.
         if [[ -n "$has_parent" ]]; then
             _assert_maybe_check_outside_root "$has_parent"
             git_mounts+=("$has_parent/.git:$has_parent/.git")
+            git_mounts+=("$ws_out/.git:$CONTAINER_WORKSPACE_ROOT/.git")
             echo "read-only locking worktree parent: $has_parent/.git"
         fi
 
@@ -982,16 +989,16 @@ _opencode_dispatch() {
         # Use the already-running container. Without -T (interactive) output streams
         # straight to the terminal; with -T it can be captured by the caller.
         if ((interactive)); then
-            _driver compose "${OPENCODE_ARGS[@]}" exec -w /workspace opencode "$@"
+            _driver compose "${OPENCODE_ARGS[@]}" exec -w "$CONTAINER_WORKSPACE_ROOT" opencode "$@"
         else
-            _driver compose "${OPENCODE_ARGS[@]}" exec -T -w /workspace opencode "$@"
+            _driver compose "${OPENCODE_ARGS[@]}" exec -T -w "$CONTAINER_WORKSPACE_ROOT" opencode "$@"
         fi
     else
         # No running container: use a throwaway container that runs the task and
         # exits, publishing no ports.
         _driver compose "${OPENCODE_ARGS[@]}" \
             run --rm \
-            -w /workspace \
+            -w "$CONTAINER_WORKSPACE_ROOT" \
             --entrypoint /bin/sh \
             opencode \
             -c 'exec "$@"' \
@@ -1020,16 +1027,46 @@ _assert_continue_outside_workspace() {
 }
 
 _check_within_workspace() {
-    local ws_out="$1"
-    # Assert the effective workspace is the profile workspace
-    if [[ -n ${OPENCODE_WORKSPACE+x} ]] && [[ "$OPENCODE_WORKSPACE" != "$ws_out" ]]; then
-        # running in a opencode space that is not the current
+    local starting_ws="$1"
+    local eff_ws="$2"
+    local has_parent="$3"
+
+    # Assert the starting or effective workspace is the profile workspace
+    if [[ -z ${OPENCODE_WORKSPACE+x} ]]; then
+        return 0
+    fi
+
+    # e.g when loading an child worktree from the parent
+    if [[ "$starting_ws" != "$eff_ws" && # effective path has changed
+          ( "$OPENCODE_WORKSPACE" == "$starting_ws" || # and one is equal to the ocws
+            "$OPENCODE_WORKSPACE" == "$eff_ws" )
+       ]]; then
+       return 0
+    fi
+
+    # When going up on a worktree the starting is the same as the eff, as the
+    # path is given. So, if the worktree has a parent, we check the parent
+    # ALLOWING OPENCODE_WORKSPACE to be the parent, but we can't on the child
+    # worktree without prompt. Check both, one must be a valid root
+    if [[ -n "$has_parent" ]]; then
         local ws_out_normalized=""
-        if ! _check_valid_within_root "$ws_out" "$OPENCODE_WORKSPACE" ws_out_normalized; then
+        if _check_valid_within_root "$has_parent" "$OPENCODE_WORKSPACE" ws_out_normalized; then
+            return 0
+        elif _check_valid_within_root "$starting_ws" "$OPENCODE_WORKSPACE" ws_out_normalized; then
+            return 0
+        else
             return 1
         fi
+    else
+        # Must be in a opencode space that is not the current for example on a
+        # gist in a opencode workspace
+        local ws_out_normalized=""
+        if ! _check_valid_within_root "$starting_ws" "$OPENCODE_WORKSPACE" ws_out_normalized; then
+            return 1
+        else
+            return 0
+        fi
     fi
-    return 0
 }
 
 # Run a command in the opencode project context.
@@ -1043,18 +1080,19 @@ _opencode_ctx() {
     WORKSPACE="$2"
     shift 2
 
-    if ! _check_within_workspace "$WORKSPACE"; then
-        _assert_continue_outside_workspace "$WORKSPACE"
-    fi
-
     # Prepare the compose args and OPENCODE_ARGS in the current shell so the
     # dispatched command and its helpers can use them, then run the command in a
     # subshell so its traps and cwd changes do not leak into the launcher.
     local -a args=()
 
-    local has_parent
+    local has_parent=""
     _resolve_effective_workspace ws_out has_parent
-    _aseert_sync_worktree "$has_parent" "$ws_out"
+
+    if ! _check_within_workspace "$WORKSPACE" "$ws_out" "$has_parent"; then
+        _assert_continue_outside_workspace "$WORKSPACE"
+    fi
+
+    _aseert_sync_worktree "$has_parent" "$ws_out" "$WORKSPACE"
     _opencode_args_prepare "$ws_out" "$has_parent" args || return 1
 
     WORKSPACE="$ws_out"
@@ -1508,7 +1546,7 @@ opencode() {
         # Start the handler in the background
         _driver compose "${OPENCODE_ARGS[@]}" exec \
             -d \
-            -w /workspace \
+            -w "$CONTAINER_WORKSPACE_ROOT" \
             opencode opencode serve \
             --hostname 0.0.0.0 --port 4096
 
@@ -1739,9 +1777,9 @@ opencode:scaffold() {
 You are creating the inital project scaffold.
 The inital project information is as follows.
 $(_print_cpu_context)
-/workspace is the project: $PROJECT_NAME 
-Working directory: /workspace
-Workspace contents of /workspace:
+$CONTAINER_WORKSPACE_ROOT is the project: $PROJECT_NAME
+Working directory: $CONTAINER_WORKSPACE_ROOT
+Workspace contents of $CONTAINER_WORKSPACE_ROOT:
 \`\`\`
 $(ls -la "$WORKSPACE")
 \`\`\`
@@ -1814,9 +1852,9 @@ opencode:bg() {
     tmp_context="<task-information>
 You are running a task in the existing project.
 $(_print_cpu_context)
-/workspace is the project: $PROJECT_NAME
-Working directory: /workspace
-Workspace contents of /workspace:
+$CONTAINER_WORKSPACE_ROOT is the project: $PROJECT_NAME
+Working directory: $CONTAINER_WORKSPACE_ROOT
+Workspace contents of $CONTAINER_WORKSPACE_ROOT:
 \`\`\`
 $(ls -la "$WORKSPACE")
 \`\`\`
@@ -1910,15 +1948,15 @@ _opencode_parse_flags() {
                     continue
                     ;;
 
-                --all|-a)
+                --all)
                     out_all=1
                     ;;
 
-                --other|-o|--others)
+                --other|--others)
                     out_other=1
                     ;;
 
-                --quiet|-q)
+                --quiet)
                     out_quiet=1
                     ;;
 
@@ -1931,11 +1969,29 @@ _opencode_parse_flags() {
                     return 2
                     ;;
 
-                -*)
-                    printf 'error: unknown option: %s\n' "$arg" >&2
-                    return 2
+                -?*)
+                    opts=${arg#-}
+                    for ((i = 0; i < ${#opts}; i++)); do
+                        case "${opts:i:1}" in
+                            a)
+                                out_all=1
+                                ;;
+                            o)
+                                out_other=1
+                                ;;
+                            q)
+                                out_quiet=1
+                                ;;
+                            n)
+                                out_dry_run=1
+                                ;;
+                            *)
+                                printf 'error: unknown option: -%s\n' "${opts:i:1}" >&2
+                                return 2
+                                ;;
+                        esac
+                    done
                     ;;
-
                 *)
                     out_args+=("$arg")
                     ;;
@@ -2365,7 +2421,7 @@ opencode:changes() {
 
     local prompt="<task-information>
 Project: $PROJECT_NAME
-Working directory: /workspace
+Working directory: $CONTAINER_WORKSPACE_ROOT
 Branch changes:
 \`\`\`
 $changes
@@ -2614,12 +2670,12 @@ _opencode_help_cmd() {
         echo "  If <project> is not specified, all opencode-docker managed containers"
         echo "  will be removed"
         echo "  Args:"
-        echo "    --all, -a   Also remove oneoff (throwaway 'compose run') containers."
-        echo "    --other, -o Force-remove everything except the current workspace; its"
-        echo "                containers, images, and networks are preserved."
-        echo "    --dry-run   Print what would be removed (containers, images, networks)"
-        echo "                without doing it."
-        echo "    [project]   The path to the project to scope the delete to."
+        echo "    --all, -a       Also remove oneoff (throwaway 'compose run') containers."
+        echo "    --other, -o     Force-remove everything except the current workspace; its"
+        echo "                    containers, images, and networks are preserved."
+        echo "    --dry-run, -n   Print what would be removed (containers, images, networks)"
+        echo "                    without doing it."
+        echo "    [project]       The path to the project to scope the delete to."
         ;;
     ls | list)
         echo "ls|list [directory] [--all] [--other] [--quiet]"
@@ -2646,11 +2702,11 @@ _opencode_help_cmd() {
         echo "  freeing their ports. 'down' scopes this to the current workspace."
         echo "  If <project> is specified then only act on that project."
         echo "  Args:"
-        echo "    --all, -a   Also stop oneoff (throwaway 'compose run') containers."
-        echo "    --other, -o Stop every managed container except the current workspace's"
-        echo "                (and its worktrees)."
-        echo "    --dry-run   Print what would be stopped without doing it."
-        echo "    [project]   The path to the project to scope the stop to."
+        echo "    --all, -a     Also stop oneoff (throwaway 'compose run') containers."
+        echo "    --other, -o   Stop every managed container except the current workspace's"
+        echo "                  (and its worktrees)."
+        echo "    --dry-run, -n Print what would be stopped without doing it."
+        echo "    [project]     The path to the project to scope the stop to."
         ;;
     run)
         echo "run [command...]"
