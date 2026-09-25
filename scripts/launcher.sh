@@ -522,7 +522,9 @@ _check_valid_within_root() {
             valid_subdir=1
         fi
     elif [[ $ws_norm == "$home" || $ws_norm == "$home"/* ]]; then
-        # The "$home/*" pattern excludes "$home" itself.
+        # HOME itself and everything below it are valid roots.
+        # FEATURE: Only sub directries of home was intended, but now is not
+        # asserted. As other roots require path == root.
         valid_subdir=1
     fi
 

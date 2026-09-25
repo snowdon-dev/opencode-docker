@@ -991,14 +991,17 @@ source "$LAUNCHER"
 set +e
 pass=1
 
-# Contract: HOME subdirectory rules, trailing-slash normalisation, "/" root.
+# Contract: HOME itself, its subdirectories, and (for the "/" root shorthand)
+# any non-root absolute path are valid; "/" is never a workspace root on its
+# own, and a sibling/outside path is rejected. Trailing slashes are normalised
+# into param 3.
 norm=""; prev=""
 _check_valid_within_root "$HOME/proj" "$HOME" norm prev || { echo "FAIL inside"; pass=0; }
 [[ "$norm" == "$HOME/proj" ]] || { echo "FAIL norm=$norm"; pass=0; }
 _check_valid_within_root "$HOME/proj/" "$HOME" norm prev || { echo "FAIL trailing"; pass=0; }
 [[ "$norm" == "$HOME/proj" ]] || { echo "FAIL norm2=$norm"; pass=0; }
 _check_valid_within_root "$HOME/sub" "$HOME" norm prev || { echo "FAIL deeper"; pass=0; }
-_check_valid_within_root "$HOME" "$HOME" norm prev && { echo "FAIL home itself counted"; pass=0; }
+_check_valid_within_root "$HOME" "$HOME" norm prev || { echo "FAIL home itself rejected"; pass=0; }
 _check_valid_within_root / / norm prev && { echo "FAIL / counted"; pass=0; }
 _check_valid_within_root /anywhere / norm prev || { echo "FAIL under-slash-root"; pass=0; }
 _check_valid_within_root "$SD_OTHER" "$HOME" norm prev && { echo "FAIL outside"; pass=0; }
@@ -1055,10 +1058,11 @@ SCRIPT
 
 t_workspace_guard() {
     # Unit test for the _check_within_workspace contract behind the
-    # OPENCODE_WORKSPACE guard: the target workspace is within reach when the
-    # environment workspace is unset, equals the target, or the target is one
-    # of its subdirectories; anything outside (a sibling) is rejected. Sourcing
-    # the launcher reuses the real function without docker or a terminal.
+    # OPENCODE_WORKSPACE guard: (starting_ws, eff_ws, has_parent). The workspace
+    # is within reach when the environment workspace is unset, equals the
+    # starting or effective workspace, or the worktree parent / starting path is
+    # a valid root under it; a sibling is rejected. Sourcing the launcher reuses
+    # the real function without docker or a terminal.
     cat >"$SD/guard.sh" <<'SCRIPT'
 set +e
 source "$LAUNCHER"
@@ -1067,21 +1071,42 @@ pass=1
 
 env_ws="$SD_GUARD/env"
 target_ws="$SD_GUARD/target"
+parent_ws="$SD_GUARD/parent"
+child_ws="$SD_GUARD/parent-wt"
 
 # No environment workspace: no guard applies.
 unset OPENCODE_WORKSPACE
-_check_within_workspace "$target_ws" || { echo "FAIL: unset env should be within"; pass=0; }
+_check_within_workspace "$target_ws" "$target_ws" "" || { echo "FAIL: unset env should be within"; pass=0; }
 
 # Target equals the environment workspace -> within.
 OPENCODE_WORKSPACE="$target_ws"
-_check_within_workspace "$target_ws" || { echo "FAIL: equal target rejected"; pass=0; }
+_check_within_workspace "$target_ws" "$target_ws" "" || { echo "FAIL: equal target rejected"; pass=0; }
 
 # Target is a subdirectory of the environment workspace -> within.
-_check_within_workspace "$target_ws/sub" || { echo "FAIL: subdirectory rejected"; pass=0; }
-_check_within_workspace "$target_ws/sub/deep" || { echo "FAIL: deep subdirectory rejected"; pass=0; }
+_check_within_workspace "$target_ws/sub" "$target_ws/sub" "" || { echo "FAIL: subdirectory rejected"; pass=0; }
+_check_within_workspace "$target_ws/sub/deep" "$target_ws/sub/deep" "" || { echo "FAIL: deep subdirectory rejected"; pass=0; }
 
 # Target outside the environment workspace (a sibling) -> rejected.
-_check_within_workspace "$env_ws" && { echo "FAIL: sibling accepted"; pass=0; }
+_check_within_workspace "$env_ws" "$env_ws" "" && { echo "FAIL: sibling accepted"; pass=0; }
+
+# Effective path changed (a child worktree opened from its parent): within while
+# the environment workspace is the starting or the effective path.
+OPENCODE_WORKSPACE="$target_ws"
+_check_within_workspace "$target_ws" "$child_ws" "" || { echo "FAIL: started-in-env eff-change rejected"; pass=0; }
+OPENCODE_WORKSPACE="$child_ws"
+_check_within_workspace "$target_ws" "$child_ws" "" || { echo "FAIL: eff-equals-env rejected"; pass=0; }
+OPENCODE_WORKSPACE="$env_ws"
+_check_within_workspace "$target_ws" "$child_ws" "" && { echo "FAIL: unrelated eff-change accepted"; pass=0; }
+
+# Going up a worktree (starting == effective, parent known): allowed when the
+# parent or the starting workspace is within the environment workspace, rejected
+# when neither is.
+OPENCODE_WORKSPACE="$parent_ws"
+_check_within_workspace "$child_ws" "$child_ws" "$parent_ws" || { echo "FAIL: worktree parent rejected"; pass=0; }
+OPENCODE_WORKSPACE="$SD_GUARD"
+_check_within_workspace "$child_ws" "$child_ws" "$parent_ws" || { echo "FAIL: worktree under env rejected"; pass=0; }
+OPENCODE_WORKSPACE="$target_ws"
+_check_within_workspace "$child_ws" "$child_ws" "$parent_ws" && { echo "FAIL: unrelated worktree parent accepted"; pass=0; }
 
 ((pass)) && echo "workspace_guard ok" || echo "workspace_guard FAIL"
 SCRIPT
