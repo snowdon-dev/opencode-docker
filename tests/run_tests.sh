@@ -17,6 +17,19 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 LAUNCHER="$ROOT_DIR/scripts/launcher.sh"
 MOCKBIN="$SCRIPT_DIR/mockbin"
 
+# The launcher prompts on /dev/tty when a workspace is outside $HOME (or outside
+# $OPENCODE_WORKSPACE). It is therefore always run through `setsid`, which puts
+# it in a new session with no controlling terminal: without that, an interactive
+# `make test` hands the launcher the developer's terminal and the read blocks
+# there (swallowing keystrokes) until Enter is pressed. Detached, /dev/tty
+# cannot be opened, so the prompt always takes its default-abort path and the
+# suite behaves the same from a terminal, a pipe or CI. util-linux and busybox
+# both ship setsid.
+if ! command -v setsid >/dev/null 2>&1; then
+    echo "Error: setsid is required to run the tests (provided by util-linux or busybox)" >&2
+    exit 1
+fi
+
 # --- test runner helpers -------------------------------------------------
 
 PASS=0
@@ -28,23 +41,30 @@ declare -a FAILED_TESTS=()
 # with a .git dir so the launcher's read-only .git mount logic is exercised.
 make_sandbox() {
     SD="$(mktemp -d "${TMPDIR:-/tmp}/opencode-tests.XXXXXX")"
-    mkdir -p "$SD/compose" "$SD/compose/compose/vol" "$SD/compose/compose/net" "$SD/compose/compose/sys" "$SD/ws/.git"
+    mkdir -p "$SD/compose" "$SD/compose/compose/vol" "$SD/compose/compose/net" \
+        "$SD/compose/compose/sys" "$SD/compose/compose/image" "$SD/ws/.git"
     echo 'services: { opencode: {} }' >"$SD/compose/docker-compose.yml"
     # The port override is always merged in these tests because the mocked
     # opencode CLI is on PATH (a host-side TUI attach requires the published
     # host port; see _opencode_on_host in the launcher).
     echo 'services: { opencode: {} }' >"$SD/compose/compose/sys/docker-compose.port.yml"
-    # Compose base args used in every expected command (git mount is pruned by
-    # mktemp normalisation).
-    CBASE="docker compose -p ws -f $SD/compose/docker-compose.yml -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.port.yml"
-    # Every launcher execution begins with the docker daemon reachability check.
-    DINFO="docker info"
+    # The sandbox workspace has no Dockerfile, so _opencode_args_prepare takes
+    # the "mount a prebuilt image" branch and merges the image overlay.
+    CIMG="$SD/compose/compose/image/docker-compose.image.yml"
+    echo 'services: { opencode: {} }' >"$CIMG"
+    # Compose base args used in every expected command, in the order
+    # _opencode_args_prepare merges them: main file, [cache], image, git mount,
+    # port. The git mount lives in a mktemp dir and is normalised to <tmp>.
+    CBASE="docker compose -p ws -f $SD/compose/docker-compose.yml -f $CIMG -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.port.yml"
+    # Container discovery: the managed label first, then -a, then the scoping
+    # label. Shared by every expectation so the flag order is defined once.
+    CPS="docker ps -q --filter label=dev.snowdon.opencode.managed=true -a"
     # _opencode_args_prepare probes for worktree-child containers of the workspace
     # before preparing the compose args; the fresh sandbox has none, so only the
     # discovery call itself is logged.
-    CPARENTPS="docker ps -q -a --filter label=dev.snowdon.opencode.managed=true --filter label=dev.snowdon.opencode.parent=$SD/ws"
+    CPARENTPS="$CPS --filter label=dev.snowdon.opencode.parent=$SD/ws"
     # The workspace-scoped listing used by up/setup (opencode:list).
-    CWSPS="docker ps -q -a --filter label=dev.snowdon.opencode.managed=true --filter label=dev.snowdon.opencode.workspace=$SD/ws"
+    CWSPS="$CPS --filter label=dev.snowdon.opencode.workspace=$SD/ws"
     # docker inspect record produced by the launcher's _container_info helper
     # (id, status, workspace, project, oneoff, tui, parent, sentinel).
     CINFO="docker inspect --format {{.ID}}{{\"\\t\"}}{{.State.Status}}{{\"\\t\"}}{{index .Config.Labels \"dev.snowdon.opencode.workspace\"}}{{\"\\t\"}}{{index .Config.Labels \"com.docker.compose.project\"}}{{\"\\t\"}}{{index .Config.Labels \"com.docker.compose.oneoff\"}}{{\"\\t\"}}{{index .Config.Labels \"dev.snowdon.opencode.tui\"}}{{\"\\t\"}}{{index .Config.Labels \"dev.snowdon.opencode.parent\"}}{{\"\\t\"}}. c1"
@@ -77,16 +97,18 @@ run_launcher() {
     fi
 
     local out
-    out="$(cd "$SD/ws" && bash "$LAUNCHER" "$cmd" "$@" </dev/null 2>&1)"
+    out="$(cd "$SD/ws" && setsid bash "$LAUNCHER" "$cmd" "$@" </dev/null 2>&1)"
     LAUNCH_RC=$?
 
     # Keep only the launcher's own output lines, dropping mock echoes.
     LAUNCH_OUT="$(printf '%s\n' "$out" | grep -v '^mocked:')"
 
-    # Normalise the docker log: collapse the nondeterministic temp mount file
+    # Normalise the docker log: collapse the nondeterministic temp files the
+    # launcher generates per run (the git mount, the worktree label override)
     # and the scaffold container pid.
     DOCKER_LOG="$(sed -E \
         -e 's#-f [^ ]*docker-compose\.git\.yml#-f <tmp>/docker-compose.git.yml#g' \
+        -e 's#-f [^ ]*docker-compose\.labels\.yml#-f <tmp>/docker-compose.labels.yml#g' \
         -e 's/oc-scaffold-[0-9]+/oc-scaffold-<pid>/g' \
         -e 's/oc-changes-[0-9]+/oc-changes-<pid>/g' \
         -e 's/oc-bg-[0-9]+/oc-bg-<pid>/g' \
@@ -144,8 +166,7 @@ t_up() {
     # up: worktree-child discovery during args preparation, then compose up, then
     # opencode:list (workspace-scoped + parent lookup) to show the container.
     run_launcher /dev/null up
-    assert_docker "$DINFO
-$CPARENTPS
+    assert_docker "$CPARENTPS
 $CBASE up -d opencode
 $CWSPS
 $CINFO
@@ -166,8 +187,7 @@ t_exec() {
     # exec calls opencode:exec directly (ensure_up is commented out in the
     # launcher), which runs docker compose exec -it.
     run_launcher /dev/null exec sh -c 'echo hi'
-    assert_docker "$DINFO
-$CPARENTPS
+    assert_docker "$CPARENTPS
 $CBASE exec -it opencode sh -c echo hi"
     assert_launcher_output_contains "Executing in opencode project: ws"
 }
@@ -175,8 +195,7 @@ $CBASE exec -it opencode sh -c echo hi"
 t_run() {
     # Container already running -> task runs inside it via exec.
     run_launcher /dev/null run "npm install"
-    assert_docker "$DINFO
-$CPARENTPS
+    assert_docker "$CPARENTPS
 $CBASE ps -q opencode
 $CBASE exec -T -w /workspace opencode npm install"
     assert_launcher_output_contains "Running in opencode project: ws"
@@ -186,8 +205,7 @@ t_run_nocontainer() {
     # No running container -> throwaway `compose run` (no ports), removed on exit.
     # Uses --entrypoint /bin/sh so the task args are exec'd by a real shell.
     OPENCODE_TEST_NO_CONTAINER=1 run_launcher /dev/null run "npm install"
-    assert_docker "$DINFO
-$CPARENTPS
+    assert_docker "$CPARENTPS
 $CBASE ps -q opencode
 $CBASE run --rm -w /workspace --entrypoint /bin/sh opencode -c exec \"\$@\" sh npm install"
 }
@@ -197,8 +215,7 @@ t_setup() {
     # session is never disturbed) first, then opencode:list to show
     # the container, then _opencode_dispatch.
     run_launcher /dev/null setup "npm install"
-    assert_docker "$DINFO
-$CPARENTPS
+    assert_docker "$CPARENTPS
 $CBASE up -d --no-recreate opencode
 $CWSPS
 $CINFO
@@ -237,8 +254,7 @@ t_setup_build_fail() {
 
 t_compose() {
     run_launcher /dev/null compose config --services
-    assert_docker "$DINFO
-$CPARENTPS
+    assert_docker "$CPARENTPS
 $CBASE config --services"
     assert_launcher_output_contains "Running Docker Compose for project: ws"
 }
@@ -251,9 +267,8 @@ t_compose_no_readonly() {
     local dotfile="$SD/readonly.env"
     echo 'SD_READ_ONLY=false' >"$dotfile"
     run_launcher "$dotfile" compose config --services
-    assert_docker "$DINFO
-$CPARENTPS
-docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
+    assert_docker "$CPARENTPS
+docker compose -p ws -f $SD/compose/docker-compose.yml -f $CIMG -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
     assert_launcher_output_contains "Running Docker Compose for project: ws"
     unset SD_READ_ONLY
 }
@@ -319,9 +334,8 @@ t_cache_all() {
     local dotfile="$SD/cache.env"
     echo 'OPENCODE_CACHE=all' >"$dotfile"
     run_launcher "$dotfile" compose config --services
-    assert_docker "$DINFO
-$CPARENTPS
-docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/vol/docker-compose.cache.yml -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
+    assert_docker "$CPARENTPS
+docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/vol/docker-compose.cache.yml -f $CIMG -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
     unset OPENCODE_CACHE
 }
 
@@ -332,9 +346,8 @@ t_cache_ids() {
     local dotfile="$SD/cache.env"
     echo 'OPENCODE_CACHE="Go PYTHON"' >"$dotfile"
     run_launcher "$dotfile" compose config --services
-    assert_docker "$DINFO
-$CPARENTPS
-docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/vol/docker-compose.go.yml -f $SD/compose/compose/vol/docker-compose.python.yml -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
+    assert_docker "$CPARENTPS
+docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/vol/docker-compose.go.yml -f $SD/compose/compose/vol/docker-compose.python.yml -f $CIMG -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
     unset OPENCODE_CACHE
 }
 
@@ -343,8 +356,7 @@ t_cache_false() {
     local dotfile="$SD/cache.env"
     echo 'OPENCODE_CACHE=false' >"$dotfile"
     run_launcher "$dotfile" compose config --services
-    assert_docker "$DINFO
-$CPARENTPS
+    assert_docker "$CPARENTPS
 $CBASE config --services"
     assert_launcher_output_contains "Running container without toolchain cache"
     unset OPENCODE_CACHE
@@ -374,9 +386,8 @@ t_cpu_cpuset() {
     local dotfile="$SD/cpu.env"
     echo 'OPENCODE_CPUSET=2-3' >"$dotfile"
     run_launcher "$dotfile" compose config --services
-    assert_docker "$DINFO
-$CPARENTPS
-docker compose -p ws -f $SD/compose/docker-compose.yml -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.cpuset.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
+    assert_docker "$CPARENTPS
+docker compose -p ws -f $SD/compose/docker-compose.yml -f $CIMG -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.cpuset.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
     assert_launcher_output_contains "Using CPUSET: 2-3"
     unset OPENCODE_CPUSET
 }
@@ -387,9 +398,8 @@ t_cpu_cpus() {
     local dotfile="$SD/cpu.env"
     echo 'OPENCODE_CPUS=2' >"$dotfile"
     run_launcher "$dotfile" compose config --services
-    assert_docker "$DINFO
-$CPARENTPS
-docker compose -p ws -f $SD/compose/docker-compose.yml -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.cpus.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
+    assert_docker "$CPARENTPS
+docker compose -p ws -f $SD/compose/docker-compose.yml -f $CIMG -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.cpus.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
     assert_launcher_output_contains "Using CPUS: 2"
     unset OPENCODE_CPUS
 }
@@ -401,9 +411,8 @@ t_cpu_both() {
     local dotfile="$SD/cpu.env"
     printf '%s\n' 'OPENCODE_CPUSET=2-3' 'OPENCODE_CPUS=2' >"$dotfile"
     run_launcher "$dotfile" compose config --services
-    assert_docker "$DINFO
-$CPARENTPS
-docker compose -p ws -f $SD/compose/docker-compose.yml -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.cpuset.yml -f $SD/compose/compose/sys/docker-compose.cpus.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
+    assert_docker "$CPARENTPS
+docker compose -p ws -f $SD/compose/docker-compose.yml -f $CIMG -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.cpuset.yml -f $SD/compose/compose/sys/docker-compose.cpus.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
     assert_launcher_output_contains "Using CPUSET: 2-3"
     assert_launcher_output_contains "Using CPUS: 2"
     unset OPENCODE_CPUSET OPENCODE_CPUS
@@ -530,7 +539,7 @@ t_start_no_host_tui() {
 
     : >"$SD/docker.log"
     local out
-    out="$(cd "$SD/ws" && PATH="$tbin$new_path" \
+    out="$(cd "$SD/ws" && setsid env PATH="$tbin$new_path" \
         OPENCODE_TEST_DOCKER_LOG="$SD/docker.log" \
         SD_OPENCODE="$SD/compose" SD_REPO_HOME="$SD/repos" SD_YOLO=true \
         bash "$LAUNCHER" start --model gpt </dev/null 2>&1)"
@@ -541,7 +550,7 @@ t_start_no_host_tui() {
         "$SD/docker.log")"
 
     # The compose args must NOT include the port override.
-    local cbase_no_port="docker compose -p ws -f $SD/compose/docker-compose.yml -f <tmp>/docker-compose.git.yml"
+    local cbase_no_port="docker compose -p ws -f $SD/compose/docker-compose.yml -f $CIMG -f <tmp>/docker-compose.git.yml"
     assert_docker_contains "$cbase_no_port up -d opencode"
     assert_docker_contains "$cbase_no_port exec -T opencode curl -fsS"
     assert_docker_contains "$cbase_no_port run --rm --remove-orphans tui attach http://opencode:4096 --model gpt"
@@ -567,8 +576,7 @@ t_start_no_host_tui() {
 t_shell() {
     # shell is a convenience alias for 'exec sh ...' in main().
     run_launcher /dev/null shell -c 'echo hi'
-    assert_docker "$DINFO
-$CPARENTPS
+    assert_docker "$CPARENTPS
 $CBASE exec -it opencode sh -c echo hi"
 }
 
@@ -591,7 +599,7 @@ t_down_refuses_other() {
     : >"$dotfile"
     run_launcher "$dotfile" down --other
     if ((LAUNCH_RC == 2)) &&
-        grep -Fq "error: --other cannot be combined with down" <<<"$LAUNCH_OUT"; then
+        grep -Fq "error: --other,-o cannot be combined with down" <<<"$LAUNCH_OUT"; then
         PASS=$((PASS + 1))
         echo "  ok: down --other refused with a clear message"
     else
@@ -601,18 +609,17 @@ t_down_refuses_other() {
         printf '  rc=%s out=%s\n' "$LAUNCH_RC" "$LAUNCH_OUT" | sed 's/^/    /'
     fi
     # Nothing is downed: no compose down/stop reach docker.
-    assert_docker "$DINFO
-$CPARENTPS"
+    assert_docker "$CPARENTPS"
 }
 
 t_delete() {
     # delete: dispatched before workspace resolution, discovers managed containers
     # via _select_managed_containers --stopped (includes -a for stopped containers),
-    # force-removes each.
+    # force-removes each. Removal is silent on stdout, so the removal itself is
+    # asserted through the docker call rather than a launcher message.
     run_launcher /dev/null delete
-    assert_docker_contains "docker ps -q -a --filter label=dev.snowdon.opencode.managed=true"
+    assert_docker_contains "$CPS"
     assert_docker_contains "docker rm -f c1"
-    assert_launcher_output_contains "Force-removing managed container"
 }
 
 t_delete_other_worktree() {
@@ -641,13 +648,11 @@ t_delete_other_worktree() {
     # The delete discovery (_select_managed_containers --other) inspects both
     # managed containers in a single batch call.
     local batch_info="${CINFO% c1} c1 wt1"
-    assert_docker "$DINFO
-$CPARENTPS
+    assert_docker "$CPARENTPS
 $child_info
 $child_info
-docker ps -q -a --filter label=dev.snowdon.opencode.managed=true
+$CPS
 $batch_info
-$CINFO
 docker rm -f c1
 docker image ls -q --filter label=dev.snowdon.opencode.workspace=$SD/wt
 docker network ls -q --filter label=dev.snowdon.opencode.workspace=$SD/wt
@@ -675,7 +680,7 @@ t_ls() {
     # must separate fields with a Go string literal {{"\t"}} (docker inspect does
     # not interpolate a raw \t, unlike docker ps).
     run_launcher /dev/null ls
-    assert_docker_contains "docker ps -q -a --filter label=dev.snowdon.opencode.managed=true"
+    assert_docker_contains "$CPS"
     assert_docker_contains '{{"\t"}}'
     # A running main container reports docker's own State.Status ("running"); no
     # idle probe is performed for its backend process.
@@ -715,7 +720,7 @@ t_ls_scope() {
     # A workspace argument scopes the listing with an extra label filter.
     run_launcher /dev/null ls "$SD/ws"
     assert_docker_contains "filter label=dev.snowdon.opencode.workspace=$SD/ws"
-    assert_docker_contains "docker ps -q -a --filter label=dev.snowdon.opencode.managed=true"
+    assert_docker_contains "$CPS"
 }
 
 t_ls_scope_worktree() {
@@ -754,7 +759,7 @@ t_ls_all() {
     # --all also lists oneoff (throwaway 'compose run') containers: the docker ps
     # call must use -a and include no oneoff filtering.
     run_launcher /dev/null ls --all
-    assert_docker_contains "docker ps -q -a --filter label=dev.snowdon.opencode.managed=true"
+    assert_docker_contains "$CPS"
     assert_launcher_output_contains "CONTAINER ID"
 }
 
@@ -856,7 +861,7 @@ t_bg_path() {
 
 t_bg_missing() {
     # bg never creates its target: a missing directory aborts before any
-    # container work (beyond the docker daemon info check).
+    # container work (no docker command is issued at all).
     local rc=0
     run_launcher /dev/null bg ./missing "test task"
     rc=$LAUNCH_RC
@@ -899,7 +904,7 @@ t_help_cmd() {
 t_help_unknown() {
     # help <unknown> returns an error to stderr.
     local out
-    out="$(cd "$SD/ws" && PATH="$MOCKBIN:$PATH" SD_OPENCODE="$SD/compose" SD_REPO_HOME="$SD/repos" \
+    out="$(cd "$SD/ws" && setsid env PATH="$MOCKBIN:$PATH" SD_OPENCODE="$SD/compose" SD_REPO_HOME="$SD/repos" \
         bash "$LAUNCHER" help nonexistent 2>&1)"
     if grep -Fq "No help available for command: nonexistent" <<<"$out"; then
         PASS=$((PASS + 1))
@@ -914,7 +919,7 @@ t_help_unknown() {
 
 t_unknown_command() {
     local out
-    out="$(cd "$SD/ws" && PATH="$MOCKBIN:$PATH" SD_OPENCODE="$SD/compose" SD_REPO_HOME="$SD/repos" \
+    out="$(cd "$SD/ws" && setsid env PATH="$MOCKBIN:$PATH" SD_OPENCODE="$SD/compose" SD_REPO_HOME="$SD/repos" \
         SD_YOLO=true bash "$LAUNCHER" bogus 2>&1)"
     if grep -Fq "Unknown command: bogus" <<<"$out"; then
         PASS=$((PASS + 1))
@@ -928,8 +933,11 @@ t_unknown_command() {
 }
 
 t_no_docker() {
-    # When the docker daemon is not reachable, the launcher prints a helpful
-    # message and exits 1. We use a fake docker that always fails.
+    # When the docker daemon is not reachable the launcher must fail loudly
+    # rather than carry on: a fake docker that always fails stands in for an
+    # unreachable daemon. There is no dedicated preflight probe any more, so the
+    # contract asserted here is behavioural: a non-zero exit, a diagnostic on
+    # stderr, and no compose/create command ever reaching docker.
     local fake_dir="$SD/fakebin"
     mkdir -p "$fake_dir"
     cat >"$fake_dir/docker" <<'FAKE'
@@ -937,32 +945,48 @@ t_no_docker() {
 exit 1
 FAKE
     chmod +x "$fake_dir/docker"
-    local out
-    out="$(cd "$SD/ws" && PATH="$fake_dir:$PATH" SD_OPENCODE="$SD/compose" SD_REPO_HOME="$SD/repos" \
-        bash "$LAUNCHER" start 2>&1)"
-    local rc=$?
-    if [[ "$rc" -ne 0 ]] && grep -Fq "Docker daemon is not running" <<<"$out"; then
+    local log="$SD/no-docker.log"
+    : >"$log"
+    local out rc=0
+    out="$(cd "$SD/ws" && setsid env PATH="$fake_dir:$PATH" OPENCODE_TEST_DOCKER_LOG="$log" \
+        SD_OPENCODE="$SD/compose" SD_REPO_HOME="$SD/repos" SD_YOLO=true \
+        bash "$LAUNCHER" start </dev/null 2>&1)" || rc=$?
+
+    if [[ "$rc" -ne 0 ]] && [[ -n "$out" ]]; then
         PASS=$((PASS + 1))
-        echo "  ok: no-docker message"
+        echo "  ok: no-docker run exits non-zero with a diagnostic"
     else
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$CURRENT:no_docker")
-        echo "  FAIL: expected exit 1 and 'Docker daemon is not running'"
+        echo "  FAIL: expected a non-zero exit and a diagnostic, got rc=$rc"
         printf '%s\n' "$out" | sed 's/^/    /'
+    fi
+    # Nothing that builds or starts a container may be attempted.
+    if grep -Eq '^docker (compose|build|run|create) ' "$log"; then
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$CURRENT:no_compose")
+        echo "  FAIL: a container-creating command was attempted without docker"
+        sed 's/^/    /' "$log"
+    else
+        PASS=$((PASS + 1))
+        echo "  ok: no container-creating command attempted without docker"
     fi
 }
 
 t_outside_root_abort() {
     # With SD_YOLO=false and HOME pointing outside the workspace, a command must
     # prompt about the directory and abort (exit != 0) without reaching any
-    # compose command. The prompt reads from /dev/tty, which the test harness
-    # has no controlling terminal for, so the default-abort path always runs
-    # here.
+    # compose command. The prompt reads from /dev/tty, and run_launcher starts
+    # the launcher with no controlling terminal (see the setsid note at the top
+    # of this file), so the read fails and the default-abort path always runs
+    # here. The dotfile's HOME is exported by run_launcher, so it is restored
+    # afterwards to keep the rest of the suite on the caller's HOME.
     local dotfile="$SD/yolo-off.env"
+    local saved_home="$HOME"
     mkdir -p "$SD/home"
     printf '%s\n' 'SD_YOLO=false' "HOME=$SD/home" >"$dotfile"
     run_launcher "$dotfile" up
-    assert_docker "$DINFO"
+    assert_docker ""
     assert_launcher_output_contains "is outside a subdirectory of HOME:"
     assert_launcher_output_contains "$SD/ws"
     assert_launcher_output_contains "Aborted."
@@ -974,6 +998,7 @@ t_outside_root_abort() {
         PASS=$((PASS + 1))
         echo "  ok: outside-root command aborts"
     fi
+    export HOME="$saved_home"
 }
 
 t_outside_root_validate() {

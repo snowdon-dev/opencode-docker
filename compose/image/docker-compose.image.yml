@@ -1,0 +1,3 @@
+services:
+    opencode:
+        image: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker:duck}

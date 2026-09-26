@@ -1,0 +1,10 @@
+services:
+    opencode:
+        build:
+            context: ${OPENCODE_CONTEXT:-.}
+            dockerfile: ${OPENCODE_DOCKERFILE:-Dockerfile}
+            args:
+                # default to duck to prevent large first load
+                #OPENCODE_IMAGE_URL: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker:full}
+                OPENCODE_IMAGE_URL: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker:duck}
+                PROJECT_WORKSPACE: ${WORKSPACE:-${SD_OPENCODE}}

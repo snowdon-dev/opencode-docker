@@ -1,16 +1,6 @@
 services:
     opencode:
         init: true
-        #image: ghcr.io/anomalyco/opencode:1.14.47
-        #image: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker}
-        build:
-            context: ${OPENCODE_CONTEXT:-.}
-            dockerfile: ${OPENCODE_DOCKERFILE:-Dockerfile}
-            args:
-                # default to duck to prevent large first load
-                #OPENCODE_IMAGE_URL: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker:full}
-                OPENCODE_IMAGE_URL: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker:duck}
-                PROJECT_WORKSPACE: ${WORKSPACE:-${SD_OPENCODE}}
         # restart: unless-stopped
         entrypoint: ["/bin/sh", "-c"]
         command:
