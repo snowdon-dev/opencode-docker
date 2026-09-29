@@ -1,0 +1,38 @@
+#!/bin/sh
+
+upstream=$(git rev-parse --abbrev-ref @{upstream} 2>/dev/null || true)
+echo "Branch: $(git branch --show-current 2>/dev/null || echo detached)"
+
+if [ -n "$upstream" ]; then
+    # Count added lines across the complete change set
+    added=$(git diff "$upstream"...HEAD --numstat | awk "{sum += \$1} END {print sum+0}")
+    working_added=$(git diff --numstat | awk "{sum += \$1} END {print sum+0}")
+    staged_added=$(git diff --cached --numstat | awk "{sum += \$1} END {print sum+0}")
+
+    total_added=$((added + working_added + staged_added))
+    if [ "$total_added" -gt 500 ]; then
+        git diff --stat "$upstream"...HEAD
+        git diff --stat --cached
+        git diff --stat
+    else
+        # Show all changes: committed + staged + unstaged
+        git diff "$upstream"...HEAD
+        git diff --cached
+        git diff
+    fi
+else
+    added=$(git diff --numstat | awk "{sum += \$1} END {print sum+0}")
+    staged_added=$(git diff --cached --numstat | awk "{sum += \$1} END {print sum+0}")
+
+    total_added=$((added + staged_added))
+    if [ "$total_added" -gt 500 ]; then
+        git diff --stat --cached
+        git diff --stat
+    else
+        git diff --cached
+        git diff
+    fi
+fi
+
+echo "Untracked files:"
+git ls-files --others --exclude-standard

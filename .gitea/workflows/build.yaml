@@ -18,29 +18,32 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # The base image is layered: empty (base) <- duck (node+python) <- full
-      # (go/c/rust). Each step pulls the parent it FROMs from the registry,
-      # so the build runs in empty -> duck -> full order.
-      - name: Build and push empty
+      # Three toolchain bases (empty <- duck <- full), each FROMing the parent it
+      # is layered on. A base carries no opencode CLI, so it is not published as
+      # a runnable image: each Dockerfile.v<N> adds the CLI plus the helper
+      # scripts on top of every base, giving the six published images
+      # (<variant>-<version>). Each step pulls the parent it FROMs from the
+      # registry, so the build runs bases in order, then the version layers.
+      - name: Build and push empty base
         uses: docker://registry.lan:5000/kaniko-project/executor:debug
         with:
           args: >-
             --context=${{ github.workspace }}
             --dockerfile=${{ github.workspace }}/opencode/Dockerfile.empty
-            --destination=registry.lan:5000/snowdon-dev/opencode:empty
+            --destination=registry.lan:5000/snowdon-dev/opencode:empty-base
             --insecure
             --insecure-pull
             --insecure-registry=registry.lan:5000
             --skip-tls-verify
             --cache=true
 
-      - name: Build and push duck
+      - name: Build and push duck base
         uses: docker://registry.lan:5000/kaniko-project/executor:debug
         with:
           args: >-
             --context=${{ github.workspace }}
             --dockerfile=${{ github.workspace }}/opencode/Dockerfile.duck
-            --destination=registry.lan:5000/snowdon-dev/opencode:duck
+            --destination=registry.lan:5000/snowdon-dev/opencode:duck-base
             --build-arg=OPENCODE_BASE_URL=registry.lan:5000/snowdon-dev/opencode
             --insecure
             --insecure-pull
@@ -48,16 +51,109 @@ jobs:
             --skip-tls-verify
             --cache=true
 
-      - name: Build and push full
+      - name: Build and push full base
         uses: docker://registry.lan:5000/kaniko-project/executor:debug
         with:
           args: >-
             --context=${{ github.workspace }}
             --dockerfile=${{ github.workspace }}/opencode/Dockerfile.full
-            --destination=registry.lan:5000/snowdon-dev/opencode:full
-            --destination=registry.lan:5000/snowdon-dev/opencode:latest
+            --destination=registry.lan:5000/snowdon-dev/opencode:full-base
             --build-arg=OPENCODE_BASE_URL=registry.lan:5000/snowdon-dev/opencode
             --build-arg=INSTALL_RUST=true
+            --insecure
+            --insecure-pull
+            --insecure-registry=registry.lan:5000
+            --skip-tls-verify
+            --cache=true
+
+      # v1: the CLI layer on top of each base, for the empty, duck and full variants
+      - name: Build and push empty-v1
+        uses: docker://registry.lan:5000/kaniko-project/executor:debug
+        with:
+          args: >-
+            --context=${{ github.workspace }}
+            --dockerfile=${{ github.workspace }}/opencode/Dockerfile.v1
+            --destination=registry.lan:5000/snowdon-dev/opencode:empty-v1
+            --build-arg=OPENCODE_BASE_URL=registry.lan:5000/snowdon-dev/opencode
+            --build-arg=BASE_TAG=empty-base
+            --insecure
+            --insecure-pull
+            --insecure-registry=registry.lan:5000
+            --skip-tls-verify
+            --cache=true
+
+      - name: Build and push duck-v1
+        uses: docker://registry.lan:5000/kaniko-project/executor:debug
+        with:
+          args: >-
+            --context=${{ github.workspace }}
+            --dockerfile=${{ github.workspace }}/opencode/Dockerfile.v1
+            --destination=registry.lan:5000/snowdon-dev/opencode:duck-v1
+            --build-arg=OPENCODE_BASE_URL=registry.lan:5000/snowdon-dev/opencode
+            --build-arg=BASE_TAG=duck-base
+            --insecure
+            --insecure-pull
+            --insecure-registry=registry.lan:5000
+            --skip-tls-verify
+            --cache=true
+
+      - name: Build and push full-v1
+        uses: docker://registry.lan:5000/kaniko-project/executor:debug
+        with:
+          args: >-
+            --context=${{ github.workspace }}
+            --dockerfile=${{ github.workspace }}/opencode/Dockerfile.v1
+            --destination=registry.lan:5000/snowdon-dev/opencode:full-v1
+            --build-arg=OPENCODE_BASE_URL=registry.lan:5000/snowdon-dev/opencode
+            --build-arg=BASE_TAG=full-base
+            --insecure
+            --insecure-pull
+            --insecure-registry=registry.lan:5000
+            --skip-tls-verify
+            --cache=true
+
+      # v2: same CLI layer, kept as its own Dockerfile so the two versions can
+      # diverge without touching the bases or v1
+      - name: Build and push empty-v2
+        uses: docker://registry.lan:5000/kaniko-project/executor:debug
+        with:
+          args: >-
+            --context=${{ github.workspace }}
+            --dockerfile=${{ github.workspace }}/opencode/Dockerfile.v2
+            --destination=registry.lan:5000/snowdon-dev/opencode:empty-v2
+            --build-arg=OPENCODE_BASE_URL=registry.lan:5000/snowdon-dev/opencode
+            --build-arg=BASE_TAG=empty-base
+            --insecure
+            --insecure-pull
+            --insecure-registry=registry.lan:5000
+            --skip-tls-verify
+            --cache=true
+
+      - name: Build and push duck-v2
+        uses: docker://registry.lan:5000/kaniko-project/executor:debug
+        with:
+          args: >-
+            --context=${{ github.workspace }}
+            --dockerfile=${{ github.workspace }}/opencode/Dockerfile.v2
+            --destination=registry.lan:5000/snowdon-dev/opencode:duck-v2
+            --build-arg=OPENCODE_BASE_URL=registry.lan:5000/snowdon-dev/opencode
+            --build-arg=BASE_TAG=duck-base
+            --insecure
+            --insecure-pull
+            --insecure-registry=registry.lan:5000
+            --skip-tls-verify
+            --cache=true
+
+      - name: Build and push full-v2 (latest)
+        uses: docker://registry.lan:5000/kaniko-project/executor:debug
+        with:
+          args: >-
+            --context=${{ github.workspace }}
+            --dockerfile=${{ github.workspace }}/opencode/Dockerfile.v2
+            --destination=registry.lan:5000/snowdon-dev/opencode:full-v2
+            --destination=registry.lan:5000/snowdon-dev/opencode:latest
+            --build-arg=OPENCODE_BASE_URL=registry.lan:5000/snowdon-dev/opencode
+            --build-arg=BASE_TAG=full-base
             --insecure
             --insecure-pull
             --insecure-registry=registry.lan:5000

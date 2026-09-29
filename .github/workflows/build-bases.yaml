@@ -1,0 +1,101 @@
+name: build & push bases (Docker Hub)
+
+on:
+    schedule:
+        # 8 hours before the weekly update workflow (Saturday 20:11 UTC vs
+        # Sunday 04:11 UTC), so the bases are fresh before any version-layer
+        # build is dispatched on top of them.
+        - cron: "11 20 * * 6"
+    workflow_dispatch:
+        inputs:
+            rust:
+                description: "Install the full Rust toolchain (INSTALL_RUST=true)"
+                type: choice
+                required: false
+                default: "true"
+                options:
+                    - "true"
+                    - "false"
+
+# Serialize runs so concurrent base builds cannot race on the same tags.
+concurrency:
+    group: docker-bases-${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    build-bases:
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+
+        steps:
+            - name: Checkout main
+              uses: actions/checkout@v6
+
+            - name: Resolve Docker Hub image name
+              id: image
+              env:
+                  DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
+              run: echo "image=${DOCKERHUB_IMAGE:-devsnowdon/opencode-docker}" >> "$GITHUB_OUTPUT"
+
+            - name: Set up QEMU
+              uses: docker/setup-qemu-action@v4
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@v4
+
+            # Requires repo secrets DOCKERHUB_USERNAME and DOCKERHUB_TOKEN
+            # (a Docker Hub access token, not the account password).
+            - name: Log in to Docker Hub
+              uses: docker/login-action@v4
+              with:
+                  username: ${{ secrets.DOCKERHUB_USERNAME }}
+                  password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+            # Three toolchain bases (empty <- duck <- full), each FROMing the
+            # parent it is layered on. A base carries no opencode CLI, so it is
+            # not published as a runnable image: each Dockerfile.v<N> adds the
+            # CLI plus the helper scripts on top of every base, giving the six
+            # published images (<variant>-<version>). Each step pulls the parent
+            # manifest it FROMs, so the build runs bases in order.
+            - name: Build and push empty base
+              uses: docker/build-push-action@v7
+              with:
+                  context: .
+                  file: opencode/Dockerfile.empty
+                  platforms: linux/amd64,linux/arm64
+                  push: true
+                  tags: ${{ steps.image.outputs.image }}:empty-base
+                  build-args: |
+                      DEVCONTAINER_VERSION=${{ github.ref }}
+                  cache-from: type=gha
+                  cache-to: type=gha,mode=max
+
+            - name: Build and push duck base
+              uses: docker/build-push-action@v7
+              with:
+                  context: .
+                  file: opencode/Dockerfile.duck
+                  platforms: linux/amd64,linux/arm64
+                  push: true
+                  tags: ${{ steps.image.outputs.image }}:duck-base
+                  build-args: |
+                      OPENCODE_BASE_URL=${{ steps.image.outputs.image }}
+                      DEVCONTAINER_VERSION=${{ github.ref }}
+                  cache-from: type=gha
+                  cache-to: type=gha,mode=max
+
+            - name: Build and push full base
+              uses: docker/build-push-action@v7
+              with:
+                  context: .
+                  file: opencode/Dockerfile.full
+                  platforms: linux/amd64,linux/arm64
+                  push: true
+                  tags: ${{ steps.image.outputs.image }}:full-base
+                  build-args: |
+                      OPENCODE_BASE_URL=${{ steps.image.outputs.image }}
+                      INSTALL_RUST=${{ inputs.rust || 'true' }}
+                      DEVCONTAINER_VERSION=${{ github.ref }}
+                  cache-from: type=gha
+                  cache-to: type=gha,mode=max

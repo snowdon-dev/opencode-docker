@@ -1,5 +1,9 @@
+# The toolchain base only: it carries no opencode CLI, so it is not runnable on
+# its own. The published images are this base plus a version layer
+# (Dockerfile.v1 / Dockerfile.v2), which is where the CLI and the helper scripts
+# are installed.
 ARG OPENCODE_BASE_URL=devsnowdon/opencode-docker
-FROM ${OPENCODE_BASE_URL}:duck
+FROM ${OPENCODE_BASE_URL}:duck-base
 
 LABEL dev.snowdon.image.opencode.variant="full"
 
@@ -44,17 +48,30 @@ RUN gopls version \
     && golangci-lint version
 
 # opencode's `!` command runs a login shell (bash -l), and Alpine's /etc/profile
-# resets PATH to the image baseline, dropping the toolchain dirs that the agent's
+# resets PATH to the image baseline, dropping the user-local dirs that the agent's
 # bash tool inherits from the serve process env. Re-add them for login shells via
-# /etc/profile.d, which /etc/profile sources after resetting PATH. Only the full
-# variant ships toolchain bins under $HOME, so the fix lives here.
+# /etc/profile.d, which /etc/profile sources after resetting PATH.
+#
+# Every user-local bin dir of the images built on this base is listed here, not
+# just this layer's: $GOPATH/bin (gopls, dlv, swag, golangci-lint) and
+# $HOME/.cargo/bin (rustup, cargo, rustc, sccache) from this layer, plus the dirs
+# the duck layer covers (${HOME}/.local/bin for `pip install --user` / pipx,
+# ${HOME}/.npm-global/bin for `npm i -g --prefix ~/.npm-global`). The list is
+# therefore self-sufficient: the v1/v2 layers on top need no script of their own,
+# and extending some other base image cannot silently drop a path. Missing dirs
+# are skipped, so nothing breaks when Rust is not installed.
 USER root
 RUN mkdir -p /etc/profile.d && cat > /etc/profile.d/50-opencode-toolchain.sh <<'EOF'
 if [ -n "${HOME}" ]; then
-    for dir in "${HOME}/.cargo/bin" "${HOME}/go/bin"; do
+    for dir in \
+        "${HOME}/.local/bin" \
+        "${HOME}/.npm-global/bin" \
+        "${HOME}/go/bin" \
+        "${HOME}/.cargo/bin"
+    do
         [ -d "${dir}" ] || continue
         case ":${PATH}:" in
-            *:${dir}:*) ;;
+            *:"${dir}":*) ;;
             *) export PATH="${dir}:${PATH}" ;;
         esac
     done

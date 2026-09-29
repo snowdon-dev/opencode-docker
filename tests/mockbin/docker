@@ -9,6 +9,9 @@
 #   compose ps   -> prints a container id
 #   docker ps    -> prints one managed container line
 #   compose exec ... sh -c <body>  -> echoes the body back as captured output
+#   compose exec ... curl ...      -> fails when OPENCODE_TEST_HEALTH_FAIL=1,
+#                                     i.e. the in-container health probe says
+#                                     "backend not up"
 set -u
 
 OPENCODE_TEST_DOCKER_LOG="${OPENCODE_TEST_DOCKER_LOG:-}"
@@ -21,8 +24,45 @@ mock_log() {
     fi
 }
 
-# Record the full invocation as a single log line for easy diffing.
-mock_log "docker $*"
+# Print the ids scripted for one workspace in a "<ws>=<id> <ws>=<id>" map, one
+# per line. An unset map prints nothing, as docker does when a label query
+# matches nothing (the unquoted expansion splits the scripted list into words).
+mock_ls_map() {
+    local map="$1" ws="$2"
+    [[ -n "$map" ]] || return 0
+    local entry
+    for entry in ${map}; do
+        if [[ "${entry%%=*}" == "$ws" ]]; then
+            printf '%s\n' "${entry#*=}"
+        fi
+    done
+}
+
+# Print the ids a `ls --filter label=<key>[=<value>]` query returns: $1 is the
+# queried value (empty for a bare label filter), $2 the "<ws>=<id>" map to answer
+# it from and $3 the ids to return when no map is scripted for that label. An
+# unset map or list prints nothing, as docker does when no resource carries the
+# label.
+mock_ls_filter() {
+    local value="$1" ws_map="$2" ids="$3"
+    if [[ -n "$ws_map" ]]; then
+        mock_ls_map "$ws_map" "$value"
+    elif [[ -n "$ids" ]]; then
+        printf '%s\n' ${ids}
+    fi
+}
+
+# Record the full invocation as a single log line for easy diffing. WORKSPACE_PARENT
+# is the launcher's env var for the worktree parent of the workspace, which the
+# compose build file turns into the PROJECT_WORKSPACE_PARENT build arg (and so into
+# the image's dev.snowdon.opencode.workspace_parent label). It is recorded only
+# when set, so the note appears exactly for the worktree launches a test cares
+# about.
+if [[ "${1:-}" == "compose" && -n "${WORKSPACE_PARENT:-}" ]]; then
+    mock_log "docker $* [env WORKSPACE_PARENT=$WORKSPACE_PARENT]"
+else
+    mock_log "docker $*"
+fi
 
 # Determine the compose subcommand (first positional that is not a flag).
 if [[ "$1" == "compose" ]]; then
@@ -66,6 +106,10 @@ if [[ "$1" == "compose" ]]; then
         # the launcher's command substitution capture works.
         if [[ "${1:-}" == "sh" && "${2:-}" == "-c" ]]; then
             printf '%s\n' "${3:-}"
+        elif [[ "${1:-}" == "curl" && "${OPENCODE_TEST_HEALTH_FAIL:-}" == "1" ]]; then
+            # The launcher's in-container health probe is a curl run inside the
+            # container. Fail it on demand so start exercises the wait path.
+            exit 7
         else
             echo "mocked: exec ${*}"
         fi
@@ -191,41 +235,71 @@ elif [[ "$1" == "exec" ]]; then
     echo "mocked: exec $cid $*"
 elif [[ "$1" == "image" && "${2:-}" == "ls" ]]; then
     # docker image ls [-q] --filter label=dev.snowdon.opencode.workspace[=<ws>]
-    # Scripted ids feed the delete --all cleanup: OPENCODE_TEST_IMAGES is the
-    # full set (bare workspace label filter), OPENCODE_TEST_IMAGE_WS is what a
-    # workspace-scoped query returns (the current workspace's image, which
-    # --other must preserve).
+    # Scripted ids feed the delete --all cleanup. Per label:
+    #   OPENCODE_TEST_IMAGE_WS_MAP      "<ws>=<id> ..." for
+    #                                    label=dev.snowdon.opencode.workspace=<ws>
+    #   OPENCODE_TEST_IMAGE_WS          ids for that same query when no map is set
+    #                                    (the current workspace's image, which
+    #                                    --other must preserve)
+    #   OPENCODE_TEST_IMAGE_PARENT_MAP  "<parent ws>=<id> ..." for
+    #                                    label=dev.snowdon.opencode.workspace_parent=<ws>
+    #                                    (the worktree image whose repository is <ws>)
+    #   OPENCODE_TEST_IMAGES            the full set, for a bare workspace filter
     shift 2
     ws_value=""
+    parent_value=""
     prev=""
     for a in "$@"; do
-        if [[ "$prev" == "--filter" && "$a" == "label=dev.snowdon.opencode.workspace" ]]; then
-            ws_value="bare"
-        elif [[ "$prev" == "--filter" && "$a" == "label=dev.snowdon.opencode.workspace="* ]]; then
-            ws_value="${a#label=dev.snowdon.opencode.workspace=}"
+        if [[ "$prev" == "--filter" ]]; then
+            case "$a" in
+            label=dev.snowdon.opencode.workspace=*)
+                ws_value="${a#label=dev.snowdon.opencode.workspace=}"
+                ;;
+            label=dev.snowdon.opencode.workspace_parent=*)
+                parent_value="${a#label=dev.snowdon.opencode.workspace_parent=}"
+                ;;
+            esac
         fi
         prev="$a"
     done
-    if [[ -n "$ws_value" && "$ws_value" != "bare" ]]; then
-        printf '%s\n' ${OPENCODE_TEST_IMAGE_WS:-}
+    if [[ -n "$parent_value" ]]; then
+        mock_ls_filter "$parent_value" "${OPENCODE_TEST_IMAGE_PARENT_MAP:-}" ""
+    elif [[ -n "$ws_value" ]]; then
+        mock_ls_filter "$ws_value" "${OPENCODE_TEST_IMAGE_WS_MAP:-}" \
+            "${OPENCODE_TEST_IMAGE_WS:-}"
     else
-        printf '%s\n' ${OPENCODE_TEST_IMAGES:-}
+        mock_ls_filter "" "" "${OPENCODE_TEST_IMAGES:-}"
     fi
     exit 0
 elif [[ "$1" == "network" && "${2:-}" == "ls" ]]; then
     # docker network ls [-q] --filter label=dev.snowdon.opencode.managed or
-    # --filter label=dev.snowdon.opencode.workspace=<ws>. As for images,
+    # --filter label=dev.snowdon.opencode.workspace[=<ws>] or
+    # --filter label=dev.snowdon.opencode.workspace_parent=<ws>. As for images,
     # OPENCODE_TEST_NETWORK_WS is the current workspace's network (preserved by
-    # --other), OPENCODE_TEST_NETWORKS the full managed set.
+    # --other), OPENCODE_TEST_NETWORKS the full managed set, and
+    # OPENCODE_TEST_NETWORK_WS_MAP / OPENCODE_TEST_NETWORK_PARENT_MAP script a
+    # network per workspace and per worktree parent.
     shift 2
+    ws_value=""
+    parent_value=""
     for a in "$@"; do
-        if [[ "$a" == "label=dev.snowdon.opencode.workspace="* ||
-            "$a" == "label=dev.snowdon.opencode.workspace" ]]; then
-            printf '%s\n' ${OPENCODE_TEST_NETWORK_WS:-}
-            exit 0
-        fi
+        case "$a" in
+        label=dev.snowdon.opencode.workspace=*)
+            ws_value="${a#label=dev.snowdon.opencode.workspace=}"
+            ;;
+        label=dev.snowdon.opencode.workspace_parent=*)
+            parent_value="${a#label=dev.snowdon.opencode.workspace_parent=}"
+            ;;
+        esac
     done
-    printf '%s\n' ${OPENCODE_TEST_NETWORKS:-}
+    if [[ -n "$parent_value" ]]; then
+        mock_ls_filter "$parent_value" "${OPENCODE_TEST_NETWORK_PARENT_MAP:-}" ""
+    elif [[ -n "$ws_value" ]]; then
+        mock_ls_filter "$ws_value" "${OPENCODE_TEST_NETWORK_WS_MAP:-}" \
+            "${OPENCODE_TEST_NETWORK_WS:-}"
+    else
+        mock_ls_filter "" "" "${OPENCODE_TEST_NETWORKS:-}"
+    fi
     exit 0
 else
     echo "mocked: unknown $*"

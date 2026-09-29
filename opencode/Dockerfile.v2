@@ -1,0 +1,55 @@
+# The opencode CLI layer (version 2): the CLI binary and the container-side
+# helper scripts, on top of any of the shared bases selected with BASE_TAG
+# (empty-base, duck-base, full-base). Kept apart from Dockerfile.v1 because the
+# two opencode versions differ in the CLI surface the scripts drive: v2 dropped
+# `opencode attach` (the TUI takes the backend as `--server`) and folded the
+# layered tui.json keybind file into a single cli.json.
+ARG OPENCODE_BASE_URL=devsnowdon/opencode-docker
+ARG BASE_TAG=empty-base
+ARG USERNAME=other
+ARG OPENCODE_VERSION=latest
+
+FROM ghcr.io/anomalyco/opencode:${OPENCODE_VERSION} AS opencode
+
+FROM ${OPENCODE_BASE_URL}:${BASE_TAG}
+
+ARG USERNAME
+ARG OPENCODE_VERSION
+LABEL dev.snowdon.image.opencode.version="${OPENCODE_VERSION}"
+
+# opencode
+ARG BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
+ENV BUN_RUNTIME_TRANSPILER_CACHE_PATH=${BUN_RUNTIME_TRANSPILER_CACHE_PATH}
+
+RUN mkdir -p /home/${USERNAME}/.config/opencode
+# Global instructions, discovered by both the client and the background service.
+COPY --chown=${USERNAME}:${USERNAME} opencode/agent.md /home/${USERNAME}/.config/opencode/AGENTS.md
+# Disable the client's Ctrl+Z "suspend terminal" keybind. opencode implements
+# it as process.kill(0, "SIGTSTP"), stopping the whole container process group;
+# inside a docker tty that freezes the session with no way to Ctrl+C/fg back.
+# cli.json is the only client configuration file in v2, replacing v1's layered
+# tui.json (and the keybind is spelled `terminal.suspend`, not `terminal_suspend`).
+COPY --chown=${USERNAME}:${USERNAME} opencode/cli.json /home/${USERNAME}/.config/opencode/cli.json
+
+USER root
+COPY --from=opencode /usr/local/bin/opencode /usr/local/bin/opencode
+RUN chmod +x /usr/local/bin/opencode
+
+# Version-shared helpers: the backend, the wait and the git analysis do not
+# touch anything that moved in v2 (`opencode serve`, curl and git are the same).
+COPY ./scripts/waitforserver.sh /usr/local/bin/waitforserver
+COPY ./scripts/git-changes /usr/local/bin/git-changes
+COPY ./scripts/start-serve-backend.sh /usr/local/bin/start-serve-backend
+COPY ./scripts/end-serve-backend.sh /usr/local/bin/end-serve-backend
+# Version-specific: start-tui drives the v2 client entrypoint.
+COPY ./scripts/v2/start-tui.sh /usr/local/bin/start-tui
+RUN chmod 755 /usr/local/bin/waitforserver \
+    /usr/local/bin/git-changes \
+    /usr/local/bin/start-serve-backend \
+    /usr/local/bin/start-tui \
+    /usr/local/bin/end-serve-backend
+
+USER $USERNAME
+RUN opencode --version
+
+ENTRYPOINT ["opencode"]

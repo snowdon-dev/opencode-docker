@@ -1,9 +1,8 @@
-ARG OPENCODE_VERSION=latest
-FROM ghcr.io/anomalyco/opencode:${OPENCODE_VERSION} AS opencode
 FROM alpine:3.24
-ARG OPENCODE_VERSION=latest
 ARG DEVCONTAINER_VERSION
-LABEL dev.snowdon.image.opencode.version="${OPENCODE_VERSION}"
+ARG USERNAME=other
+ARG USER_UID=1000
+ARG USER_GID=1000
 LABEL dev.snowdon.image.opencode.devcontainer="${DEVCONTAINER_VERSION}"
 LABEL dev.snowdon.image.opencode.variant="empty"
 LABEL dev.snowdon.opencode.managed=true
@@ -12,9 +11,6 @@ LABEL dev.snowdon.opencode.managed=true
 
 ENV TERM=xterm-256color
 ENV COLORTERM=truecolor
-ARG USERNAME=other
-ARG USER_UID=1000
-ARG USER_GID=1000
 
 # ------------------------------------------------------------
 # User setup
@@ -35,16 +31,32 @@ RUN addgroup -g $USER_GID $USERNAME \
 # ------------------------------------------------------------
 # Minimal CLI toolset common to every variant. Language runtimes live in the
 # duck and full layers.
+#
+# Versions are pinned with apk's "~" prefix-match operator, which fixes the major
+# version while still absorbing minor updates and Alpine -rN security rebuilds.
+# jq~1 tracks 1.8.2 -> 1.9.x but a 2.0.0 release fails the build loudly instead
+# of silently upgrading. Bump the digit(s) when a major bump is intended.
 RUN apk add --no-cache \
-    git>=2.54 \
-    curl>=8.22 \
-    make>=4.4 \
-    libpcap-dev>=1.10.6 \
-    bash>=5.3 \
-    ripgrep>=15.1 \
-    libgcc>=15.2 \
-    libstdc++>=15.2 \
-    neovim
+    bash~5 \
+    curl~8 \
+    diffutils~3 \
+    gawk~5 \
+    git~2 \
+    libgcc~15 \
+    libpcap-dev~1 \
+    libstdc++~15 \
+    make~4 \
+    neovim~0 \
+    ripgrep~15 \
+    actionlint~1 \
+    bats~1 \
+    fd~10 \
+    github-cli~2 \
+    jo~1 \
+    jq~1 \
+    shellcheck~0 \
+    yamllint~1 \
+    yq~4
 
 
 ENV EDITOR=nvim
@@ -55,14 +67,25 @@ RUN git --version \
     && curl --version \
     && make --version \
     && rg --version \
-    && bash --version
+    && bash --version \
+    && awk --version \
+    && diff --version \
+    && nvim --version \
+    && bats --version \
+    && shellcheck --version \
+    && fd --version \
+    && jq --version \
+    && yq --version \
+    && jo -v \
+    && yamllint --version \
+    && actionlint --version \
+    && gh --version
 
 # ------------------------------------------------------------
 # Start user config
 # ------------------------------------------------------------
 # Switch to the non-root user
 USER $USERNAME
-
 
 # ------------------------------------------------------------
 # End
@@ -75,25 +98,5 @@ ENV XDG_CACHE_HOME="/home/${USERNAME}/.cache"
 ENV XDG_CONFIG_HOME="/home/${USERNAME}/.config"
 
 # Workspace used by opencode
-WORKDIR /workspace
+WORKDIR /workspace/project
 ENV HOME=/home/$USERNAME
-
-# opencode
-ARG BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
-ENV BUN_RUNTIME_TRANSPILER_CACHE_PATH=${BUN_RUNTIME_TRANSPILER_CACHE_PATH}
-
-RUN mkdir -p /home/${USERNAME}/.config/opencode
-COPY --chown=${USERNAME}:${USERNAME} opencode/agent.md /home/${USERNAME}/.config/opencode/AGENTS.md
-# Disable the TUI's Ctrl+Z "suspend terminal" keybind. opencode implements it
-# as process.kill(0, "SIGTSTP"), stopping the whole container process group;
-# inside a docker tty that freezes the session with no way to Ctrl+C/fg back.
-COPY --chown=${USERNAME}:${USERNAME} opencode/tui.json /home/${USERNAME}/.config/opencode/tui.json
-
-USER root
-COPY --from=opencode /usr/local/bin/opencode /usr/local/bin/opencode
-RUN chmod +x /usr/local/bin/opencode
-
-USER $USERNAME
-RUN opencode --version
-
-ENTRYPOINT ["opencode"]

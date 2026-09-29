@@ -1,4 +1,34 @@
 #!/bin/bash
-# Mock curl for launcher tests. Always succeeds so the backend health check
-# passes and the start command can proceed past the wait loop.
+# Mock curl for launcher tests. Succeeds by default so the backend health check
+# passes and the start command can proceed straight to the attach.
+#
+# Every call is recorded to the docker log (when OPENCODE_TEST_DOCKER_LOG is
+# set) so a test can assert which URL was probed: the health endpoint the
+# launcher selects for the opencode version in use, and the waitforserver polls.
+#
+# The failure switches drive the "backend is not up yet" path: the launcher then
+# starts `opencode serve` and waits for it with scripts/waitforserver.sh, which
+# polls curl until it answers.
+#   OPENCODE_TEST_HEALTH_FAIL=1  every probe fails (the wait must time out)
+#   OPENCODE_TEST_HEALTH_AFTER=N  the first N probes fail, the rest succeed
+#   OPENCODE_TEST_CURL_COUNT_FILE path to append the call count to, so a test can
+#                                assert how many probes were made
+count_file="${OPENCODE_TEST_CURL_COUNT_FILE:-}"
+calls=0
+if [[ -n "$count_file" && -f "$count_file" ]]; then
+    calls="$(cat "$count_file")"
+fi
+calls=$((calls + 1))
+if [[ -n "$count_file" ]]; then
+    printf '%s' "$calls" >"$count_file"
+fi
+
+if [[ -n "${OPENCODE_TEST_DOCKER_LOG:-}" ]]; then
+    printf 'curl %s\n' "$*" >>"$OPENCODE_TEST_DOCKER_LOG"
+fi
+
+[[ "${OPENCODE_TEST_HEALTH_FAIL:-}" == "1" ]] && exit 7
+if [[ -n "${OPENCODE_TEST_HEALTH_AFTER:-}" ]] && ((calls <= OPENCODE_TEST_HEALTH_AFTER)); then
+    exit 7
+fi
 exit 0

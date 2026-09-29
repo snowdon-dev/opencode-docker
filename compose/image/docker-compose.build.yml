@@ -5,6 +5,12 @@ services:
             dockerfile: ${OPENCODE_DOCKERFILE:-Dockerfile}
             args:
                 # default to duck to prevent large first load
-                #OPENCODE_IMAGE_URL: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker:full}
-                OPENCODE_IMAGE_URL: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker:duck}
+                #OPENCODE_IMAGE_URL: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker:full-v1}
+                OPENCODE_IMAGE_URL: ${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker:duck-v1}
                 PROJECT_WORKSPACE: ${WORKSPACE:-${SD_OPENCODE}}
+                # The worktree parent of the workspace (empty when it is not a
+                # worktree). Labelled on the built image as
+                # dev.snowdon.opencode.workspace_parent, so 'delete --all' on the
+                # repository still finds this image once the worktree's container
+                # is gone. See Dockerfile.example.
+                PROJECT_WORKSPACE_PARENT: ${WORKSPACE_PARENT:-}

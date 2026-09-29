@@ -6,14 +6,14 @@ on:
             - "v*"
     workflow_dispatch:
         inputs:
-            rust:
-                description: "Install the full Rust toolchain (INSTALL_RUST=true)"
-                type: choice
+            v1_version:
+                description: "opencode version to build on the v1 line (blank: resolve the current one)"
+                type: string
                 required: false
-                default: "true"
-                options:
-                    - "true"
-                    - "false"
+            v2_version:
+                description: "opencode version to build on the v2 line (blank: resolve the current one)"
+                type: string
+                required: false
 
 #    branches:
 #      - main
@@ -35,6 +35,17 @@ jobs:
         permissions:
             contents: read
 
+        env:
+            # The opencode major lines to build, one opencode/Dockerfile.<line>
+            # each, mirroring VERSIONS in the Makefile. A line with no
+            # Dockerfile is skipped rather than fatal: see the resolve step.
+            OPENCODE_LINES: v1 v2
+            # Exchanged for a ghcr.io pull token by resolve-opencode-version.sh,
+            # so the registry lookups do not draw on the anonymous per-IP rate
+            # limit bucket shared by every job on a runner. A public package
+            # needs no packages:read permission for the exchange.
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
         steps:
             - name: Checkout latest tag
               uses: actions/checkout@v6
@@ -44,6 +55,68 @@ jobs:
               env:
                   DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
               run: echo "image=${DOCKERHUB_IMAGE:-devsnowdon/opencode-docker}" >> "$GITHUB_OUTPUT"
+
+            # Which opencode version to build on each line.
+            #
+            # The update workflow passes the version it detected as an update for
+            # each line, so the build is pinned to exactly what was found. A tag
+            # push (make tag-major/minor/patch) dispatches no inputs, so each line
+            # resolves its own current version here instead, from the upstream
+            # container registry: the version layers are built
+            # FROM ghcr.io/anomalyco/opencode:<version>, so a git tag on its own
+            # is not buildable.
+            #
+            # A line is skipped, never fatal: it has no opencode/Dockerfile.<line>
+            # (an upstream major this repo does not build, e.g. a v3 update before
+            # a Dockerfile.v3 exists), or the registry publishes no images on the
+            # line yet. The update workflow fails on an unbuildable upstream major
+            # so the line cannot be missed silently, while this job simply has
+            # nothing to build for it. A registry that cannot be queried at all is
+            # fatal: skipping that would publish a tag with the line's images
+            # missing and nothing looking broken.
+            - name: Resolve opencode versions
+              id: versions
+              env:
+                  INPUT_V1: ${{ inputs.v1_version }}
+                  INPUT_V2: ${{ inputs.v2_version }}
+              run: |
+                  for line in $OPENCODE_LINES; do
+                      if [ ! -f "opencode/Dockerfile.$line" ]; then
+                          echo "::notice title=Skipping $line::no opencode/Dockerfile.$line, nothing to build"
+                          continue
+                      fi
+
+                      case "$line" in
+                      v1) requested="${INPUT_V1:-}" ;;
+                      v2) requested="${INPUT_V2:-}" ;;
+                      *) requested="" ;;
+                      esac
+
+                      if [ -z "$requested" ]; then
+                          rc=0
+                          requested="$(bin/resolve-opencode-version.sh "${line#v}")" || rc=$?
+                          if [ "$rc" -eq 1 ]; then
+                              echo "::notice title=Skipping $line::no published opencode images on the $line line, nothing to build"
+                              continue
+                          fi
+                          if [ "$rc" -ne 0 ]; then
+                              echo "::error title=Could not resolve $line version::resolve-opencode-version.sh exited $rc"
+                              exit 1
+                          fi
+                      fi
+
+                      # A version from another line would build an image whose
+                      # label claims a CLI it does not contain, so refuse it. This
+                      # is a dispatch mistake rather than an upstream change, so
+                      # it is fatal rather than a skip.
+                      if [ "${requested%%.*}" != "${line#v}" ]; then
+                          echo "::error title=Wrong version for $line::$requested is not an ${line} version"
+                          exit 1
+                      fi
+
+                      echo "$line: building opencode $requested"
+                      echo "${line}_version=$requested" >> "$GITHUB_OUTPUT"
+                  done
 
             - name: Set up QEMU
               uses: docker/setup-qemu-action@v4
@@ -59,7 +132,9 @@ jobs:
                   username: ${{ secrets.DOCKERHUB_USERNAME }}
                   password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-            - name: Compute image tags for full
+            - name: Compute image tags for the newest full image
+              # The release/version tag and the :latest alias both point at
+              # full-v2, the newest full variant layer.
               id: tags
               run: |
                   IMAGE="${{ steps.image.outputs.image }}"
@@ -70,63 +145,107 @@ jobs:
                   fi
                   echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
 
-            - name: Get latest release
-              id: release
-              uses: actions/github-script@v8
-              with:
-                  script: |
-                      const { data } = await github.rest.repos.getLatestRelease({
-                        owner: 'anomalyco',
-                        repo: 'opencode'
-                      });
-                      const tag = data.tag_name;
-                      const version = tag.startsWith('v') ? tag.slice(1) : tag;
-                      core.setOutput('latest', version);
-
-            # The base image is layered: empty (base) <- duck (node+python) <- full
-            # (go/c/rust). Each step pulls the parent manifest it FROMs, so the build
-            # and push runs in empty -> duck -> full order.
-            - name: Build and push empty
+            # v1: the CLI layer on top of each base, for the empty, duck and full
+            # variants. Skipped when the v1 line resolved no version to build.
+            - name: Build and push empty-v1
+              if: steps.versions.outputs.v1_version != ''
               uses: docker/build-push-action@v7
               with:
                   context: .
-                  file: opencode/Dockerfile.empty
+                  file: opencode/Dockerfile.v1
                   platforms: linux/amd64,linux/arm64
                   push: true
-                  tags: ${{ steps.image.outputs.image }}:empty
-                  build-args: |
-                      OPENCODE_VERSION=${{ steps.release.outputs.latest }}
-                      DEVCONTAINER_VERSION=${{github.ref}}
-                  cache-from: type=gha
-                  cache-to: type=gha,mode=max
-
-            - name: Build and push duck
-              uses: docker/build-push-action@v7
-              with:
-                  context: .
-                  file: opencode/Dockerfile.duck
-                  platforms: linux/amd64,linux/arm64
-                  push: true
-                  tags: ${{ steps.image.outputs.image }}:duck
+                  tags: ${{ steps.image.outputs.image }}:empty-v1
                   build-args: |
                       OPENCODE_BASE_URL=${{ steps.image.outputs.image }}
-                      OPENCODE_VERSION=${{ steps.release.outputs.latest }}
-                      DEVCONTAINER_VERSION=${{github.ref}}
+                      BASE_TAG=empty-base
+                      OPENCODE_VERSION=${{ steps.versions.outputs.v1_version }}
                   cache-from: type=gha
                   cache-to: type=gha,mode=max
 
-            - name: Build and push full
+            - name: Build and push duck-v1
+              if: steps.versions.outputs.v1_version != ''
               uses: docker/build-push-action@v7
               with:
                   context: .
-                  file: opencode/Dockerfile.full
+                  file: opencode/Dockerfile.v1
                   platforms: linux/amd64,linux/arm64
                   push: true
-                  tags: ${{ steps.tags.outputs.tags }},${{ steps.image.outputs.image }}:full
+                  tags: ${{ steps.image.outputs.image }}:duck-v1
                   build-args: |
                       OPENCODE_BASE_URL=${{ steps.image.outputs.image }}
-                      INSTALL_RUST=${{ inputs.rust || 'true' }}
-                      OPENCODE_VERSION=${{ steps.release.outputs.latest }}
-                      DEVCONTAINER_VERSION=${{github.ref}}
+                      BASE_TAG=duck-base
+                      OPENCODE_VERSION=${{ steps.versions.outputs.v1_version }}
                   cache-from: type=gha
                   cache-to: type=gha,mode=max
+
+            - name: Build and push full-v1
+              if: steps.versions.outputs.v1_version != ''
+              uses: docker/build-push-action@v7
+              with:
+                  context: .
+                  file: opencode/Dockerfile.v1
+                  platforms: linux/amd64,linux/arm64
+                  push: true
+                  tags: ${{ steps.image.outputs.image }}:full-v1
+                  build-args: |
+                      OPENCODE_BASE_URL=${{ steps.image.outputs.image }}
+                      BASE_TAG=full-base
+                      OPENCODE_VERSION=${{ steps.versions.outputs.v1_version }}
+                  cache-from: type=gha
+                  cache-to: type=gha,mode=max
+
+            # v2: same CLI layer, kept as its own Dockerfile so the two versions
+            # can diverge without touching the bases or v1. Skipped when the v2
+            # line resolved no version to build, which is also what leaves the
+            # :latest alias on full-v2 unpushed.
+            - name: Build and push empty-v2
+              if: steps.versions.outputs.v2_version != ''
+              uses: docker/build-push-action@v7
+              with:
+                  context: .
+                  file: opencode/Dockerfile.v2
+                  platforms: linux/amd64,linux/arm64
+                  push: true
+                  tags: ${{ steps.image.outputs.image }}:empty-v2
+                  build-args: |
+                      OPENCODE_BASE_URL=${{ steps.image.outputs.image }}
+                      BASE_TAG=empty-base
+                      OPENCODE_VERSION=${{ steps.versions.outputs.v2_version }}
+                  cache-from: type=gha
+                  cache-to: type=gha,mode=max
+
+            - name: Build and push duck-v2
+              if: steps.versions.outputs.v2_version != ''
+              uses: docker/build-push-action@v7
+              with:
+                  context: .
+                  file: opencode/Dockerfile.v2
+                  platforms: linux/amd64,linux/arm64
+                  push: true
+                  tags: ${{ steps.image.outputs.image }}:duck-v2
+                  build-args: |
+                      OPENCODE_BASE_URL=${{ steps.image.outputs.image }}
+                      BASE_TAG=duck-base
+                      OPENCODE_VERSION=${{ steps.versions.outputs.v2_version }}
+                  cache-from: type=gha
+                  cache-to: type=gha,mode=max
+
+            # The release tag and the :latest alias both land here, because
+            # full-v2 is the newest full variant layer (LATEST in the Makefile).
+            - name: Build and push full-v2 (latest)
+              if: steps.versions.outputs.v2_version != ''
+              uses: docker/build-push-action@v7
+              with:
+                  context: .
+                  file: opencode/Dockerfile.v2
+                  platforms: linux/amd64,linux/arm64
+                  push: true
+                  tags: ${{ steps.tags.outputs.tags }},${{ steps.image.outputs.image }}:full-v2
+                  build-args: |
+                      OPENCODE_BASE_URL=${{ steps.image.outputs.image }}
+                      BASE_TAG=full-base
+                      OPENCODE_VERSION=${{ steps.versions.outputs.v2_version }}
+                  cache-from: type=gha
+                  cache-to: type=gha,mode=max
+

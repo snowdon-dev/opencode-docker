@@ -1,5 +1,9 @@
+# The toolchain base only: it carries no opencode CLI, so it is not runnable on
+# its own. The published images are this base plus a version layer
+# (Dockerfile.v1 / Dockerfile.v2), which is where the CLI and the helper scripts
+# are installed.
 ARG OPENCODE_BASE_URL=devsnowdon/opencode-docker
-FROM ${OPENCODE_BASE_URL}:empty
+FROM ${OPENCODE_BASE_URL}:empty-base
 
 LABEL dev.snowdon.image.opencode.variant="duck"
 
@@ -24,16 +28,23 @@ RUN python3 --version \
     && npm --version
 
 # Alpine's /etc/profile resets PATH to the image baseline, dropping user-local
-# binary dirs from a login shell. pip --user / pipx install into ${HOME}/.local/bin
-# and npm --prefix ~/.npm-global into ${HOME}/.npm-global/bin; re-add them for
-# login shells. A distinct profile.d name ensures the full layer's toolchain
-# script (50-...) appends to this one instead of overwriting it.
+# binary dirs from a login shell. This layer installs node/npm and python/pip
+# system-wide, but their userspace installs land under $HOME: `pip install
+# --user` and pipx write executables to ${HOME}/.local/bin, `npm i -g --prefix
+# ~/.npm-global` writes them to ${HOME}/.npm-global/bin. Re-add both for login
+# shells; missing dirs are skipped, so a user who never creates them is
+# unaffected.
+#
+# Every layer ships its own numerically prefixed profile.d script listing every
+# user-local bin dir of the images built on it (the dirs its own tools install
+# into, plus any a child layer adds), so the distinct name makes the full layer's
+# script (50-...) extend this one instead of overwriting it.
 RUN mkdir -p /etc/profile.d && cat > /etc/profile.d/40-opencode-user-bin.sh <<'EOF'
 if [ -n "${HOME}" ]; then
     for dir in "${HOME}/.local/bin" "${HOME}/.npm-global/bin"; do
         [ -d "${dir}" ] || continue
         case ":${PATH}:" in
-            *:${dir}:*) ;;
+            *:"${dir}":*) ;;
             *) export PATH="${dir}:${PATH}" ;;
         esac
     done

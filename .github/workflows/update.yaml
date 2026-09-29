@@ -17,6 +17,19 @@ jobs:
             contents: write
             actions: write
 
+        env:
+            # The opencode major lines this repo publishes, one
+            # opencode/Dockerfile.<line> each. Every line is detected on its own:
+            # an upstream release on one line is not a release on the others.
+            OPENCODE_LINES: v1 v2
+            # The variant whose label records a line's current opencode version.
+            IMAGE_VARIANT: empty
+            # Exchanged for a ghcr.io pull token by resolve-opencode-version.sh,
+            # so the registry lookups do not draw on the anonymous per-IP rate
+            # limit bucket shared by every job on a runner. A public package
+            # needs no packages:read permission for the exchange.
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
         steps:
             - name: Checkout main
               uses: actions/checkout@v6
@@ -31,92 +44,113 @@ jobs:
                   DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
               run: echo "image=${DOCKERHUB_IMAGE:-devsnowdon/opencode-docker}" >> "$GITHUB_OUTPUT"
 
-            - name: Get previous image opencode version
-              id: previous
+            # An upstream line newer than the newest one this repo builds is a
+            # release this repo would otherwise silently never publish: there is
+            # no opencode/Dockerfile.<line> for it, so the images would stay on
+            # the old line forever and nothing would look broken. Fail the run
+            # instead, so adding the line is a deliberate act.
+            #
+            # The lines upstream publishes are read from the registry, the same
+            # source the build FROMs: a line only becomes visible here once its
+            # images exist, which is exactly when it becomes buildable.
+            #
+            # Only lines above the newest supported one are considered: a line
+            # below it may simply be one this repo has dropped.
+            - name: Fail on an unsupported upstream major
               run: |
-                  IMAGE="${{ steps.image.outputs.image }}"
+                  newest=0
+                  for line in $OPENCODE_LINES; do
+                      if [ "${line#v}" -gt "$newest" ]; then
+                          newest="${line#v}"
+                      fi
+                  done
 
-                  if ! docker pull "$IMAGE:latest" >/dev/null 2>&1; then
-                    echo "No previous image found; assuming first build."
-                    echo "version=" >> "$GITHUB_OUTPUT"
-                    exit 0
+                  if ! upstream_majors="$(bin/resolve-opencode-version.sh --majors)"; then
+                      echo "::error title=Could not list upstream opencode versions::resolve-opencode-version.sh failed; refusing to guess"
+                      exit 1
                   fi
 
-                  VERSION="$(
-                    docker inspect "$IMAGE:latest" \
-                      --format '{{ index .Config.Labels "dev.snowdon.image.opencode.version" }}' \
-                      2>/dev/null || true
-                  )"
-                  case "$VERSION" in
-                    '' | '<no value>') VERSION="" ;;
-                  esac
+                  unsupported=""
+                  while read -r major; do
+                      if [ "$major" -gt "$newest" ] && [ ! -f "opencode/Dockerfile.v$major" ]; then
+                          echo "::error title=Unsupported opencode major::upstream publishes v$major and there is no opencode/Dockerfile.v$major to build it"
+                          unsupported="$unsupported v$major"
+                      fi
+                  done <<< "$upstream_majors"
 
-                  echo "OpenCode version: ${VERSION:-<none>}"
-                  echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+                  if [ -n "$unsupported" ]; then
+                      echo "Add opencode/Dockerfile.v<major> for$unsupported, add the line to OPENCODE_LINES and to VERSIONS in the Makefile, then re-run."
+                      exit 1
+                  fi
 
-            - name: Get latest OpenCode release versions
-              id: release
+                  echo "Upstream opencode majors are all buildable (newest supported: v$newest)."
+
+            # Per-line detection. Each line is resolved and compared on its own,
+            # against its own image:
+            #
+            #   * a line with no opencode/Dockerfile.<line> cannot be built, and
+            #     that is a misconfiguration rather than an upstream change, so
+            #     it fails the run;
+            #   * otherwise the newest published version on the line is resolved
+            #     from the upstream container registry and compared with the
+            #     version recorded in that line's own image label.
+            #
+            # The current version is read from <image>:<variant>-<line>, not from
+            # <image>:latest. :latest aliases one variant of one line, so reading
+            # it for every line made a v1-only upstream release invisible, which
+            # is how the v1 images fell behind.
+            #
+            # compare-opencode-version.sh prints the version to build on stdout
+            # and exits 0 when the line is behind upstream, 1 when it is already
+            # current, 2 on a usage or lookup error, and 3 when the registry
+            # publishes no images on the line yet (a skip, not a failure).
+            - name: Detect upstream opencode updates
+              id: update
               env:
-                  PREVIOUS_IMAGE_VERSION: ${{ steps.previous.outputs.version }}
-              uses: actions/github-script@v8
-              with:
-                  script: |
-                      const { data } = await github.rest.repos.listReleases({
-                        owner: 'anomalyco',
-                        repo: 'opencode',
-                        per_page: 2
-                      });
-
-                      const published = data.filter(r => !r.draft && !r.prerelease);
-                      if (published.length < 1) {
-                        core.setFailed('Could not find a published OpenCode release');
-                        return;
-                      }
-
-                      function parseVersion(version) {
-                        const match = version.match(/^(\d+)\.(\d+)\.(\d+)$/);
-                        if (!match) {
-                          throw new Error(`Invalid semantic version: ${version}`);
-                        }
-                        return {
-                          major: Number(match[1]),
-                          minor: Number(match[2]),
-                          patch: Number(match[3]),
-                        };
-                      }
-
-                      const latest = published[0].tag_name.replace(/^v/, '');
-                      const latestVersion = parseVersion(latest);
-
-                      const imageVersion = process.env.PREVIOUS_IMAGE_VERSION || '';
-
-                      function isNewer(a, b) {
-                        return a.major > b.major ||
-                          (a.major === b.major && a.minor > b.minor) ||
-                          (a.major === b.major && a.minor === b.minor &&
-                           a.patch > b.patch);
-                      }
-
-                      const updated = !imageVersion || isNewer(latestVersion, parseVersion(imageVersion));
-
-                      core.info(`Image OpenCode version: ${imageVersion || '<none>'}`);
-                      core.info(`Latest OpenCode:        ${latest}`);
-                      core.info(`Updated:                ${updated}`);
-
-                      core.setOutput('latest', latest);
-                      core.setOutput('major', latestVersion.major);
-                      core.setOutput('updated', String(updated));
-
-            - name: Failed if something might break
-              if: steps.release.outputs.updated != 'false'
+                  IMAGE: ${{ steps.image.outputs.image }}
               run: |
-                  MAJOR=${{ steps.release.outputs.major }}
-                  if [ "$MAJOR" != "1" ]; then
-                    exit 1
-                  fi
+                  updated=false
+                  status=0
 
+                  for line in $OPENCODE_LINES; do
+                      line_updated=false
+
+                      if [ ! -f "opencode/Dockerfile.$line" ]; then
+                          echo "::error title=Missing Dockerfile::opencode/Dockerfile.$line is missing, so the $line line cannot be detected or built"
+                          status=1
+                          continue
+                      fi
+
+                      if version="$(
+                          bin/compare-opencode-version.sh \
+                              "${line#v}" "$IMAGE:$IMAGE_VARIANT-$line"
+                      )"; then
+                          line_updated=true
+                          updated=true
+                          echo "$line: update found, building $version"
+                          echo "${line}_version=$version" >> "$GITHUB_OUTPUT"
+                      else
+                          case "$?" in
+                          1) echo "$line: already current" ;;
+                          3) echo "$line: no published images upstream yet, skipping" ;;
+                          *)
+                              echo "::error title=Unresolvable version::could not determine a published version for the $line line"
+                              status=1
+                              ;;
+                          esac
+                      fi
+
+                      echo "${line}_updated=$line_updated" >> "$GITHUB_OUTPUT"
+                  done
+
+                  echo "updated=$updated" >> "$GITHUB_OUTPUT"
+                  exit "$status"
+
+            # No update on any line means no rebuild and no release: the bases are
+            # rebuilt on every run that gets this far, and rebuilding them without
+            # a new opencode to package would only churn the published tags.
             - name: Install svu
-              if: steps.release.outputs.updated != 'false'
+              if: steps.update.outputs.updated == 'true'
               run: |
                   go install github.com/caarlos0/svu@latest
                   echo "$HOME/go/bin" >> "$GITHUB_PATH"
@@ -126,7 +160,7 @@ jobs:
             # default GITHUB_TOKEN do not emit workflow events, so the explicit
             # dispatch below is required.
             - name: Tag patch
-              if: steps.release.outputs.updated != 'false'
+              if: steps.update.outputs.updated == 'true'
               id: tag
               run: |
                   TAG="$(svu patch)"
@@ -135,10 +169,15 @@ jobs:
                   git push origin "$TAG"
                   echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
+            # The detected versions are handed over explicitly so the build is
+            # pinned to exactly what was found here. A line that was already
+            # current is passed empty and build-push resolves it for itself.
             - name: Trigger build & push
-              if: steps.release.outputs.updated != 'false'
+              if: steps.update.outputs.updated == 'true'
               env:
                   GH_TOKEN: ${{ github.token }}
               run: |
                   echo "Dispatching 'build & push opencode (Docker Hub)' for ${{ steps.tag.outputs.tag }}"
-                  gh workflow run build-push.yaml --ref "${{ steps.tag.outputs.tag }}"
+                  gh workflow run build-push.yaml --ref "${{ steps.tag.outputs.tag }}" \
+                      -f v1_version="${{ steps.update.outputs.v1_version }}" \
+                      -f v2_version="${{ steps.update.outputs.v2_version }}"

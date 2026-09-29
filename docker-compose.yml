@@ -10,32 +10,37 @@ services:
             - "dev.snowdon.opencode.workspace=${WORKSPACE}"
         networks:
             - extra-network
+        working_dir: /workspace/project
         volumes:
-            - ${WORKSPACE:-${SD_OPENCODE}}:/workspace
+            - ${WORKSPACE:-${SD_OPENCODE}}:/workspace/project
             - /etc/localtime:/etc/localtime:ro
 
             # opencode
             - ${OPENCODE_CACHE_DIR:-${HOME}/.cache/opencode/cache}:/home/other/.cache/opencode/cache
             - ${OPENCODE_DATA_DIR:-${HOME}/.local/share/opencode}:/home/other/.local/share/opencode
             - ${OPENCODE_CONFIG_DIR:-${HOME}/.config/opencode}:/home/other/.config/opencode
-            - ${SD_OPENCODE}/opencode/agent.md:/home/other/.config/opencode/AGENTS.md:ro
 
     # only run as one off
     tui:
-        image: ${OPENCODE_IMAGE_URL_TUI:-devsnowdon/opencode-docker:empty}
+        image: ${OPENCODE_IMAGE_URL_TUI:-devsnowdon/opencode-docker:empty-v1}
         stdin_open: true
         tty: true
+        entrypoint: ["start-tui", "0"]
         labels:
             - "dev.snowdon.opencode.managed=true"
             - "dev.snowdon.opencode.tui=true"
             - "dev.snowdon.opencode.workspace=${WORKSPACE}"
         networks:
             - extra-network
+        working_dir: /workspace/project
         volumes:
-            # opencode's Ctrl+Z "suspend terminal" keybind sends SIGTSTP to the whole
-            # process group (process.kill(0)), which freezes the container session
-            # irrecoverably. This disables it; see opencode/tui.json.
-            - ${SD_OPENCODE}/opencode/tui.json:/home/other/.config/opencode/tui.json:ro
+            - ${OPENCODE_CONFIG_DIR:-${HOME}/.config/opencode}:/home/other/.config/opencode
+            # The client's Ctrl+Z "suspend terminal" keybind sends SIGTSTP to the
+            # whole process group (process.kill(0)), which freezes the container
+            # session irrecoverably. This disables it; see opencode/tui.json for v1
+            # and opencode/cli.json for v2 (v2 has a single client config file),
+            # selected by the launcher from OPENCODE_IMAGE_VERSION.
+            #- ${SD_OPENCODE}/opencode/${OPENCODE_CLIENT_CONFIG:-tui.json}:/home/other/.config/opencode/${OPENCODE_CLIENT_CONFIG:-tui.json}:ro
 
 networks:
     extra-network:
