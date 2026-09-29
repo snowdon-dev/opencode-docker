@@ -63,12 +63,13 @@ fi
 IMAGE_URL="${OPENCODE_IMAGE_URL:-devsnowdon/opencode-docker:duck}"
 
 if [[ -f "${OPENCODE_DOCKERFILE:-}" ]] && [[ -z "${OPENCODE_CONTEXT:-}" ]]; then
-    OPENCODE_CONTEXT="$(dirname "$OPENCODE_DOCKERFILE")"
-    OPENCODE_DOCKERFILE="$(basename "$OPENCODE_DOCKERFILE")"
+    tmpdpath="$(realpath "$OPENCODE_DOCKERFILE")"
+    OPENCODE_CONTEXT="$(dirname "$tmpdpath")"
+    OPENCODE_DOCKERFILE="$tmpdpath"
     export OPENCODE_CONTEXT OPENCODE_DOCKERFILE
 fi
-OPENCODE_DOCKERFILE="${OPENCODE_DOCKERFILE:-Dockerfile}"
-OPENCODE_CONTEXT="${OPENCODE_CONTEXT:-.}"
+OPENCODE_DOCKERFILE="${OPENCODE_DOCKERFILE:-}"
+OPENCODE_CONTEXT="${OPENCODE_CONTEXT:-}"
 
 # Range for managed docker networks: an explicit CIDR `("172.20.0.0/16")`, or a
 # bare prefix whose mask is implied at 8 bits per octet `("172.20" -> /16)`.
