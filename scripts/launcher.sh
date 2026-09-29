@@ -2328,6 +2328,10 @@ opencode:delete() {
     local ws_scope=""
     local cid_match=0
     if (( this )); then
+        # FEATURE: delete --this, then delete --all does now work on worktrees
+        # - it misses the image if the image was on a worktree with a parent of
+        # this cwd. As the docker information in not there anymore to find. We
+        # need a seperate db to make this work
         ws_scope="$(_opencode_current_workspace)"
     elif [[ -n "${args[0]:-}" ]]; then
         if [[ -d "${args[0]}" ]]; then
@@ -2340,7 +2344,7 @@ opencode:delete() {
     function _ws_remove() {
         local -n ids="$1"
         if (( ${#ids[@]} < 1 )); then
-            return 1
+            return 0
         fi
         _driver container_rm -f "${ids[@]}"|| {
             echo "Error: failed to remove container(s)"

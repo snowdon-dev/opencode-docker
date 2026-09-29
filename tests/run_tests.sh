@@ -275,39 +275,41 @@ docker compose -p ws -f $SD/compose/docker-compose.yml -f $CIMG -f $SD/compose/c
 
 t_context_file_derive() {
     # OPENCODE_DOCKERFILE pointing at a file derives the build context from the
-    # file's directory (basedir) and rebases the dockerfile to its basename, so
-    # compose resolves the dockerfile relative to the derived context.
+    # file's directory (basedir). Both are resolved to absolute paths so the
+    # derived context and dockerfile stay consistent regardless of the cwd the
+    # launcher is driven from.
     mkdir -p "$SD/ws/myBuild"
     : >"$SD/ws/myBuild/Dockerfile.dev"
     local out
     out="$(cd "$SD/ws" && PATH="$MOCKBIN:$PATH" OPENCODE_DOCKERFILE="myBuild/Dockerfile.dev" \
         bash -c 'unset OPENCODE_CONTEXT; source "$1"
             printf "%s|%s\n" "$OPENCODE_CONTEXT" "$OPENCODE_DOCKERFILE"' _ "$LAUNCHER")"
-    if [[ "$out" == "myBuild|Dockerfile.dev" ]]; then
+    if [[ "$out" == "$SD/ws/myBuild|$SD/ws/myBuild/Dockerfile.dev" ]]; then
         PASS=$((PASS + 1))
         echo "  ok: derived context and dockerfile from basedir"
     else
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$CURRENT:derive")
-        echo "  FAIL: expected 'myBuild|Dockerfile.dev', got: '$out'"
+        echo "  FAIL: expected '$SD/ws/myBuild|$SD/ws/myBuild/Dockerfile.dev', got: '$out'"
     fi
 }
 
 t_context_must_be_file() {
     # OPENCODE_DOCKERFILE must name a regular file; a directory-valued variable
-    # does NOT trigger derivation (both stay at their defaults).
+    # does NOT trigger derivation, so both keep the values they were given
+    # (an unset OPENCODE_CONTEXT stays empty).
     mkdir -p "$SD/ws/myBuild"
     local out
     out="$(cd "$SD/ws" && PATH="$MOCKBIN:$PATH" OPENCODE_DOCKERFILE="myBuild" \
         bash -c 'unset OPENCODE_CONTEXT; source "$1"
             printf "%s|%s\n" "$OPENCODE_CONTEXT" "$OPENCODE_DOCKERFILE"' _ "$LAUNCHER")"
-    if [[ "$out" == ".|myBuild" ]]; then
+    if [[ "$out" == "|myBuild" ]]; then
         PASS=$((PASS + 1))
         echo "  ok: no derivation for a directory-valued dockerfile"
     else
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$CURRENT:no_derive_dir")
-        echo "  FAIL: expected '.|myBuild', got: '$out'"
+        echo "  FAIL: expected '|myBuild', got: '$out'"
     fi
 }
 
