@@ -1,9 +1,14 @@
 # opencode dev container
 
+[![CI](https://github.com/snowdon-dev/opencode-docker/actions/workflows/ci.yaml/badge.svg)](https://github.com/snowdon-dev/opencode-docker/actions/workflows/ci.yaml)
 [![Docker Pulls](https://img.shields.io/docker/pulls/devsnowdon/opencode-docker)](https://hub.docker.com/r/devsnowdon/opencode-docker)
 [![Docker Image Version](https://img.shields.io/docker/v/devsnowdon/opencode-docker?sort=semver)](https://hub.docker.com/r/devsnowdon/opencode-docker)
-[![Docker Image Size](https://img.shields.io/docker/image-size/devsnowdon/opencode-docker)](https://hub.docker.com/r/devsnowdon/opencode-docker)
-[![CI](https://github.com/snowdon-dev/opencode-docker/actions/workflows/ci.yaml/badge.svg)](https://github.com/snowdon-dev/opencode-docker/actions/workflows/ci.yaml)
+[![License](https://img.shields.io/github/license/snowdon-dev/opencode-docker)](https://github.com/snowdon-dev/opencode-docker/blob/main/LICENSE)
+
+| Version | Empty | Duck | Full |
+|---|---|---|---|
+| v2 | ![size](https://img.shields.io/docker/image-size/devsnowdon/opencode-docker/empty-v2) | ![size](https://img.shields.io/docker/image-size/devsnowdon/opencode-docker/duck-v2) | ![size](https://img.shields.io/docker/image-size/devsnowdon/opencode-docker/full-v2) |
+| v1 | ![size](https://img.shields.io/docker/image-size/devsnowdon/opencode-docker/empty-v1) | ![size](https://img.shields.io/docker/image-size/devsnowdon/opencode-docker/duck-v1) | ![size](https://img.shields.io/docker/image-size/devsnowdon/opencode-docker/full-v1) |
 
 A security and human-control oriented [opencode](https://opencode.ai) workflow
 that runs in Docker containers. The current project bind-mounted at
@@ -435,7 +440,7 @@ opencode:uptree ~/repos/myproject
 ```
 
 Either way the worktree becomes a workspace of its own, with its own container
-named after the `<project>-dev` project (see [Worktrees](#worktrees)).
+named after the `<project>-dev` project.
 
 ## Start extending with custom functions
 

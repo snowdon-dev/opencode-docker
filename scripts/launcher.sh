@@ -278,6 +278,21 @@ THIS_OTHER_ERROR="Error: Combinding --other,-o and --this,-t is invalid and equi
 
 
 # Cleanup stuff
+#
+# Everything the EXIT trap can call is defined here, before the trap is armed
+# and before anything that can exit early does: this script is sourced, so an
+# exit part-way through it (an unknown cache id, no docker or podman on PATH)
+# still runs the handlers registered below. A handler defined further down would
+# not exist yet, and the run would end with "_cleanup: command not found" on top
+# of the error that stopped it.
+
+# clean up time main files with the docker compose merge
+function _cleanup() {
+    if [[ -n "$tmp_sd_root_dir" && -d "$tmp_sd_root_dir" ]]; then
+       rm -rf -- "$tmp_sd_root_dir"
+    fi
+}
+
 _cleanup_scaffold_name=""
 _cleanup_scaffold_pid=""
 _cleanup_scaffold_output=""
@@ -663,13 +678,6 @@ function _network_builder() {
     }
 
     return 0
-}
-
-# clean up time main files with the docker compose merge
-function _cleanup() {
-    if [[ -n "$tmp_sd_root_dir" && -d "$tmp_sd_root_dir" ]]; then
-       rm -rf -- "$tmp_sd_root_dir"
-    fi
 }
 
 # print a message about the current git details of the cwd
@@ -1158,20 +1166,35 @@ function _aseert_sync_worktree() {
 function _assert_maybe_write_config_dirs() {
     local -a dirs=()
 
-    [[ "${OPENCODE_CACHE:-}" == *python* || "${OPENCODE_CACHE:-}" == all ]] && dirs+=(
+    # Ids are matched case-insensitively, like parse_cache and the cache
+    # override-file loop in _opencode_args_prepare already do (OPENCODE_CACHE
+    # accepts "PYTHON NODE" as readily as "python node"). Matching the raw
+    # value instead checked nothing for an upper-case request, so the check
+    # passed and docker was left to create the cache dirs itself (as root).
+    local cache_lower="${OPENCODE_CACHE:-}"
+    cache_lower="${cache_lower,,}"
+
+    # "all" is the full toolchain, and parse_cache only rewrites it to the
+    # canonical id list when OPENCODE_CACHE also picks the image, so expand it
+    # here too: every cache dir the aggregate override mounts gets checked.
+    if [[ "$cache_lower" == "all" ]]; then
+        cache_lower="go rust python node"
+    fi
+
+    [[ "$cache_lower" == *python* ]] && dirs+=(
         "${OPENCODE_PIP_CACHE_DIR:-${HOME}/.cache/pip}"
     )
 
-    [[ "${OPENCODE_CACHE:-}" == *node* || "${OPENCODE_CACHE:-}" == all ]] && dirs+=(
+    [[ "$cache_lower" == *node* ]] && dirs+=(
         "${OPENCODE_NPM_CACHE_DIR:-${HOME}/.npm}"
     )
 
-    [[ "${OPENCODE_CACHE:-}" == *go* || "${OPENCODE_CACHE:-}" == all ]] && dirs+=(
+    [[ "$cache_lower" == *go* ]] && dirs+=(
         "${OPENCODE_GO_BUILD_CACHE_DIR:-${HOME}/.cache/go-build}"
         "${OPENCODE_GO_MOD_CACHE_DIR:-${HOME}/go/pkg/mod}"
     )
 
-    [[ "${OPENCODE_CACHE:-}" == *rust* || "${OPENCODE_CACHE:-}" == all ]] && dirs+=(
+    [[ "$cache_lower" == *rust* ]] && dirs+=(
         "${OPENCODE_CARGO_REGISTRY_DIR:-${HOME}/.cargo/registry}"
         "${OPENCODE_CARGO_GIT_DIR:-${HOME}/.cargo/git}"
         "${OPENCODE_SCCACHE_DIR:-${HOME}/.cache/sccache}"
@@ -1200,6 +1223,18 @@ function _assert_maybe_write_config_dirs() {
     if ((${#missing[@]})); then
         printf 'The following directories do not exist:\n'
         printf '  %s\n' "${missing[@]}"
+
+        # Only ask when there is someone to answer. bash shows a read prompt
+        # only on a terminal, so with stdin redirected (a script, CI, a cron
+        # job) the read returned nothing and fell through to the decline
+        # branch, reporting "No directories were created." without saying why.
+        # Nothing is created either way on such a run: name the directories and
+        # stop, so the failure points at the cause rather than at a question
+        # nobody was there to answer.
+        if [[ ! -t 0 ]]; then
+            printf 'Not interactive: create them above and re-run.\n'
+            exit 1
+        fi
 
         read -r -p "Create these directories? [y/N] " answer
 

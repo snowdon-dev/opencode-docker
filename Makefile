@@ -31,7 +31,7 @@ VERSION_BUILD_ARGS = \
 
 .PHONY: run
 run:
-	SD_OPENCODE="$(pwd)" bash scripts/launcher.sh $(ARGS)
+	SD_OPENCODE="$(CURDIR)" bash scripts/launcher.sh $(ARGS)
 
 # Engine invocations, one per build family. Only the prefix differs, the version
 # loop below is shared. Bases must be tagged (and, for --push, published) before

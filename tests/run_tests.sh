@@ -75,6 +75,9 @@ make_sandbox() {
     # the "mount a prebuilt image" branch and merges the image overlay.
     CIMG="$SD/compose/compose/image/docker-compose.image.yml"
     echo 'services: { opencode: {} }' >"$CIMG"
+    # Toolchain cache dirs live in the sandbox, not under the host's $HOME, so a
+    # launcher run never stops to offer creating them (see _cache_dirs).
+    _cache_dirs
     # Compose base args used in every expected command, in the order
     # _opencode_args_prepare merges them: main file, [cache], image, git mount,
     # port. The git mount lives in a mktemp dir and is normalised to <tmp>.
@@ -363,6 +366,42 @@ _cache_vol_files() {
     done
 }
 
+# Point every toolchain cache dir override at a directory inside the sandbox and
+# create it. The launcher checks the host dirs backing the selected caches and
+# refuses to start when one of them is missing, and the compose vol overrides
+# read the very same variables; both default to paths under $HOME. Keeping them
+# in the sandbox is what makes the cache tests independent of whoever runs the
+# suite: a CI runner home holds none of them, so without this the launcher
+# stopped on the missing directories and never built the compose command the
+# cache tests assert.
+#   _cache_dirs
+_cache_dirs() {
+    mkdir -p "$SD/cache/pip" "$SD/cache/npm" "$SD/cache/go-build" \
+        "$SD/cache/go-mod" "$SD/cache/cargo-registry" "$SD/cache/cargo-git" \
+        "$SD/cache/sccache"
+    export OPENCODE_PIP_CACHE_DIR="$SD/cache/pip"
+    export OPENCODE_NPM_CACHE_DIR="$SD/cache/npm"
+    export OPENCODE_GO_BUILD_CACHE_DIR="$SD/cache/go-build"
+    export OPENCODE_GO_MOD_CACHE_DIR="$SD/cache/go-mod"
+    export OPENCODE_CARGO_REGISTRY_DIR="$SD/cache/cargo-registry"
+    export OPENCODE_CARGO_GIT_DIR="$SD/cache/cargo-git"
+    export OPENCODE_SCCACHE_DIR="$SD/cache/sccache"
+}
+
+# Point the same overrides at paths that do not exist, so the launcher's offer
+# to create a missing cache dir (and the abort that follows when it is
+# declined) can be exercised without touching the host's home.
+#   _cache_dirs_absent
+_cache_dirs_absent() {
+    export OPENCODE_PIP_CACHE_DIR="$SD/absent/pip"
+    export OPENCODE_NPM_CACHE_DIR="$SD/absent/npm"
+    export OPENCODE_GO_BUILD_CACHE_DIR="$SD/absent/go-build"
+    export OPENCODE_GO_MOD_CACHE_DIR="$SD/absent/go-mod"
+    export OPENCODE_CARGO_REGISTRY_DIR="$SD/absent/cargo-registry"
+    export OPENCODE_CARGO_GIT_DIR="$SD/absent/cargo-git"
+    export OPENCODE_SCCACHE_DIR="$SD/absent/sccache"
+}
+
 # --- individual tests ---------------------------------------------------
 
 t_up() {
@@ -562,6 +601,75 @@ t_cache_all() {
     assert_docker "$CPARENTPS
 docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CACHEVOL/docker-compose.cache.yml -f $CIMG -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
     unset OPENCODE_CACHE
+}
+
+t_cache_all_bare_home() {
+    # The cache tests must not lean on the toolchain cache dirs the host's home
+    # happens to have. With OPENCODE_CACHE=all the launcher checks all seven and
+    # offers to create the missing ones (see _assert_maybe_write_config_dirs),
+    # answering that prompt from the closed stdin the suite runs it with: on a
+    # home without them it aborts before building the compose command at all,
+    # which is how this test failed in CI, where a runner home holds no
+    # ~/.cache/pip, ~/go/pkg/mod, ~/.cargo/registry or ~/.cache/sccache. Running
+    # against a bare HOME makes that dependency fail here on any machine
+    # instead of only where the host home happens to be incomplete.
+    _cache_vol_files go rust python node
+    local dotfile="$SD/cache.env"
+    echo 'OPENCODE_CACHE=all' >"$dotfile"
+    local saved_home="$HOME"
+    HOME="$SD/bare-home"
+    export HOME
+    mkdir -p "$HOME"
+    run_launcher "$dotfile" compose config --services
+    HOME="$saved_home"
+    export HOME
+    unset OPENCODE_CACHE
+    assert_docker "$CPARENTPS
+docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CACHEVOL/docker-compose.cache.yml -f $CIMG -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
+    assert_launcher_output_lacks "The following directories do not exist:"
+}
+
+t_cache_dirs_missing_aborts() {
+    # The launcher side of the contract _cache_dirs works around: a cache dir
+    # that does not exist is named and, run without a terminal (as here, with
+    # stdin closed), reported and refused instead of being created, before any
+    # compose command is built. So no container starts against a cache path
+    # docker would have to create as root, and a non-interactive run fails on
+    # the real cause instead of on a question nobody was there to answer. The
+    # suite therefore hands the launcher cache dirs that already exist.
+    _cache_vol_files go rust python node
+    _cache_dirs_absent
+    local dotfile="$SD/cache.env"
+    echo 'OPENCODE_CACHE=all' >"$dotfile"
+    run_launcher "$dotfile" compose config --services
+    # Restore the sandbox-provided dirs: the exports above outlive the test.
+    _cache_dirs
+    unset OPENCODE_CACHE
+    assert_docker "$CPARENTPS"
+    assert_launcher_output_contains "$SD/absent/go-mod"
+    assert_launcher_output_contains "The following directories do not exist:"
+    assert_launcher_output_contains "Not interactive: create them above and re-run."
+    assert_rc 1 "$LAUNCH_RC" "a missing cache dir aborts before compose"
+}
+
+t_cache_dirs_uppercase_ids() {
+    # OPENCODE_CACHE is documented, and used by t_cache_ids, as
+    # case-insensitive, so "PYTHON NODE" has to be checked for its cache dirs
+    # exactly like "python node". The check matched the raw value, so an
+    # upper-case request skipped it entirely: the launcher went on to build the
+    # compose command and docker created ~/.cache/pip and ~/.npm itself, as
+    # root, instead of the user being offered to create them first.
+    _cache_vol_files python node
+    _cache_dirs_absent
+    local dotfile="$SD/cache.env"
+    echo 'OPENCODE_CACHE="PYTHON NODE"' >"$dotfile"
+    run_launcher "$dotfile" compose config --services
+    _cache_dirs
+    unset OPENCODE_CACHE
+    assert_docker "$CPARENTPS"
+    assert_launcher_output_contains "$SD/absent/npm"
+    assert_launcher_output_contains "The following directories do not exist:"
+    assert_rc 1 "$LAUNCH_RC" "an upper-case cache id is still checked"
 }
 
 t_cache_ids() {
@@ -1761,6 +1869,55 @@ t_unknown_command() {
         FAIL=$((FAIL + 1))
         FAILED_TESTS+=("$CURRENT:msg")
         echo "  FAIL: expected 'Unknown command: bogus'"
+        printf '%s\n' "$out" | sed 's/^/    /'
+    fi
+}
+
+t_no_driver_on_path() {
+    # Neither docker nor podman on PATH is fatal, and it fails on that alone.
+    # The launcher exits while it is still being sourced, so the EXIT trap runs
+    # the handlers registered so far; it used to follow the real error with
+    # "_cleanup: command not found", because that function was defined hundreds
+    # of lines further down and did not exist yet.
+    # The launcher needs ordinary tools (mktemp) before it reaches the driver
+    # check, so the PATH is rebuilt from symlinks to everything this host has,
+    # minus docker and podman: no engine is reachable, and the launcher itself
+    # still runs. Same trick as the tbin in run_launcher_no_host_opencode.
+    local tbin="$SD/tbin"
+    mkdir -p "$tbin"
+    local dir name
+    while IFS= read -r dir; do
+        [[ -d "$dir" ]] || continue
+        for name in "$dir"/*; do
+            [[ -x "$name" ]] || continue
+            case "${name##*/}" in
+                docker | podman) continue ;;
+            esac
+            [[ -e "$tbin/${name##*/}" ]] || ln -s "$name" "$tbin/${name##*/}"
+        done
+    done < <(tr ':' '\n' <<<"$PATH")
+    local out rc=0
+    out="$(cd "$SD/ws" && PATH="$tbin" SD_OPENCODE="$SD/compose" SD_REPO_HOME="$SD/repos" \
+        SD_YOLO=true "$tbin/setsid" "$tbin/bash" "$LAUNCHER" compose config --services \
+        </dev/null 2>&1)" || rc=$?
+
+    if [[ "$rc" -eq 1 ]] && [[ "$out" == *"found neither docker nor podman"* ]]; then
+        PASS=$((PASS + 1))
+        echo "  ok: no engine on PATH exits 1 with the driver diagnostic"
+    else
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$CURRENT:no_driver")
+        echo "  FAIL: expected rc=1 and the driver diagnostic, got rc=$rc"
+        printf '%s\n' "$out" | sed 's/^/    /'
+    fi
+
+    if [[ "$out" != *"command not found"* ]]; then
+        PASS=$((PASS + 1))
+        echo "  ok: the early exit leaves no stray cleanup error"
+    else
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$CURRENT:no_cleanup_error")
+        echo "  FAIL: the early exit reported a missing cleanup handler"
         printf '%s\n' "$out" | sed 's/^/    /'
     fi
 }
