@@ -11,6 +11,8 @@
 # FEATURE: Read launcher environment variables from a environment file that can
 # be read even when not inside a OPENCODE_WORKSPACE, such that a zsh profile is
 # not required.
+# FEATURE:create pr/commit. from the staged changes spawn opencode and retrive
+# the commit message, then in bash commit the changes.
 
 set -euo pipefail
 
@@ -1063,9 +1065,13 @@ function _resolve_effective_workspace() {
         mapfile -t children <<< "$children_output"
     fi
     if ((${#children[@]} > 1)); then
-        # TODO: if there are more than one, unless given via the path, we use 
+        # TODO: if there are more than one, 
+        # - unless given via the path, we use 
         # the one at the SD_TREE_ROOT, this is the main one, if that does not
         # exist, then err
+        # - docker ps does not show one off containers, which could be used, it
+        # does not pass --all to select_managed_contaienrs, only --stopped, so
+        # one off containers never be considered as the database
         echo "Incorrect (${children[*]}) number of children containers for this workspace."
         exit 1
     elif ((${#children[@]} == 0)); then
@@ -3402,12 +3408,12 @@ function _cleanup_repl() {
     _oc_repl_release
 }
 
-function _oc_repl_prompt() {
+_oc_repl_prompt() {
     local run_count
     run_count=$(find "$_oc_repl_parent_dir" -maxdepth 1 -type f 2>/dev/null | wc -l)
 
-    printf '%s' \
-        '\[\e[38;5;46m\]⌂ '"$oc_project_name"'\[\e[38;5;39m\]   ⚡ \[\e[38;5;214m\]tasks: '"$run_count"'\[\e[0m\]\n\[\e[38;5;39m\]❯ \[\e[0m\]'
+    PS1='\[\e[38;5;46m\]⌂ '"$oc_project_name"'\[\e[38;5;39m\]   ⚡ \[\e[38;5;214m\]tasks: '"$run_count"'\[\e[0m\]
+\[\e[38;5;39m\]❯ \[\e[0m\]'
 }
 
 # Launch a real interactive bash shell bound to the workspaceEvery opencode
@@ -3525,7 +3531,7 @@ function custom_repl() {
         # child shell expands when it reads the rcfile. Double quotes would run
         # _oc_repl_prompt here, at rcfile-generation time.
         # shellcheck disable=SC2016
-        printf '%s\n' 'PS1=$(_oc_repl_prompt)'
+        printf '%s\n' 'PROMPT_COMMAND=_oc_repl_prompt'
         printf '%s\n' 'unset -f _opencode_dispatch_shims 2>/dev/null || true'
     } >"$_cleanup_repl_rcfile"
 
