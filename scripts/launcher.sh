@@ -195,9 +195,9 @@ function parse_image_url() {
         fi
     done
 
-    # Validate that the image URL matched one of the supported prefixes.
+    # For custom image URLs not matching known prefixes, don't apply validation
     if [[ "$matched" != true ]]; then
-        echo "NOTICE: unsupported image URL '$OPENCODE_IMAGE_URL'" >&2
+        echo "NOTICE: custom image URL '$OPENCODE_IMAGE_URL'" >&2
         return 0
     fi
 }
@@ -342,7 +342,7 @@ net_base=""
 net_mask=""
 
 # The project name used for the compose project
-project_name=""
+oc_project_name=""
 
 # The arguemnts used when creating the compose project, creating a merged
 # compose file
@@ -673,7 +673,7 @@ function _network_builder() {
         "$parent" \
         >/dev/null 2>&1 || {
         # Failure: A project with name ($PROJECT_NAME) already existed and is active?
-        echo "Network failed to create with name ($project_name)"
+        echo "Network failed to create with name ($oc_project_name)"
         return 1
     }
 
@@ -1085,7 +1085,7 @@ function _resolve_effective_workspace() {
     # assign to globals
     hp="$w"
     w="$eff_path"
-    project_name="$eff_proj"
+    oc_project_name="$eff_proj"
 }
 
 # When operating from a parent repository, determine whether a child
@@ -1131,7 +1131,6 @@ function _aseert_sync_worktree() {
         is_parent_merge_base=1
     fi
 
-    # TODO and if parent is clean?
     if ((is_same_commit || is_parent_merge_base)); then
         return 0
     fi
@@ -1264,7 +1263,7 @@ function _opencode_args_prepare() {
     # Build Docker Compose arguments starting with the main compose file
     # after resolving any worktree args
     args_out+=(
-        -p "$project_name"
+        -p "$oc_project_name"
         -f "$SD_OPENCODE/docker-compose.yml"
     )
 
@@ -1313,17 +1312,6 @@ function _opencode_args_prepare() {
         fi
     fi
 
-    if [[ "$image_url_set" == true && -n "$IMAGE_COMPONENT" ]]; then
-        case "$IMAGE_COMPONENT" in
-            empty|full|duck)
-                ;;
-            *)
-                echo "Error: invalid component '$IMAGE_COMPONENT' (expected empty, full, or duck)" >&2
-                return 1
-                ;;
-        esac
-    fi
-
     # FEATURE: if not avaliable and it is not the known prefix, we can could
     # try to get the required information from docker image inspect of images
     # that implement the base feature requirements
@@ -1332,11 +1320,9 @@ function _opencode_args_prepare() {
     if [[ -n "$IMAGE_COMPONENT" ]]; then
         local skill_file="available-$IMAGE_COMPONENT-tools.md"
         local skill_path="$SD_OPENCODE/opencode/skills/$skill_file"
-        if [[ ! -f "$skill_path" ]]; then
-            echo "Error: Failed to resolve a skills path" >&2
-            exit 1
+        if [[ -f "$skill_path" ]]; then
+            volume_mounts+=("$skill_path:$CONTAINER_HOME/.config/opencode/skills/$skill_file")
         fi
-        volume_mounts+=("$skill_path:$CONTAINER_HOME/.opencode/skills/$skill_file")
     fi
 
     # Check the directories exist on the host, ask the user if we should write
@@ -1360,8 +1346,8 @@ function _opencode_args_prepare() {
     if [[ "${OPENCODE_NETWORK:-}" == "@default" ]]; then
         # default to using a custom workspace
         local proj_name
-        _network_builder "$project_name" "$ws_out" "$has_parent" || {
-            echo "Failed to create or find network for project: $project_name" >&2
+        _network_builder "$oc_project_name" "$ws_out" "$has_parent" || {
+            echo "Failed to create or find network for project: $oc_project_name" >&2
             return 1
         }
         OPENCODE_NETWORK="$network_name"
@@ -1589,43 +1575,44 @@ function _check_within_workspace() {
 # inherited ws/proj, the OPENCODE_ARGS array, and $@ for trailing args.
 function _opencode_ctx() {
     local fn="$1"
-    WORKSPACE="$2"
+    oc_workspace="$2"
     shift 2
 
     # Prepare the compose args and OPENCODE_ARGS in the current shell so the
     # dispatched command and its helpers can use them, then run the command in a
     # subshell so its traps and cwd changes do not leak into the launcher.
     local has_parent=""
-    local ws_out="$WORKSPACE"
+    local ws_out="$oc_workspace"
     _resolve_effective_workspace ws_out has_parent
 
-    if ! _check_within_workspace "$WORKSPACE" "$ws_out" "$has_parent"; then
-        _assert_continue_outside_workspace "$WORKSPACE"
+    if ! _check_within_workspace "$oc_workspace" "$ws_out" "$has_parent"; then
+        _assert_continue_outside_workspace "$oc_workspace"
     fi
 
     if (( ! global_skip_assert_worktree )); then
-        _aseert_sync_worktree "$has_parent" "$ws_out" "$WORKSPACE"
+        _aseert_sync_worktree "$has_parent" "$ws_out" "$oc_workspace"
     fi
 
     local -a args=()
     _opencode_args_prepare "$ws_out" "$has_parent" args || return 1
 
-    WORKSPACE="$ws_out"
+    oc_workspace="$ws_out"
 
     opencode_compose_args=("${args[@]}")
 
     # Display configuration information
-    echo "Using opencode workspace: $WORKSPACE"
-    echo "Compose project: $project_name"
+    echo "Using opencode workspace: $oc_workspace"
+    echo "Compose project: $oc_project_name"
 
     (
         # traps inside subshell for proper cleanup and signal handling
+        _cleanup_stack=()
         trap _cleanup_run EXIT
         trap 'exit 130' INT
         trap 'exit 143' TERM
 
-        cd "$WORKSPACE" || exit 1
-        export WORKSPACE
+        cd "$oc_workspace" || exit 1
+        export WORKSPACE="$oc_workspace"
         # The image build arg behind the dev.snowdon.opencode.workspace_parent
         # label (PROJECT_WORKSPACE_PARENT in compose/image/docker-compose.build.yml,
         # consumed by the workspace Dockerfile): a worktree's image records its
@@ -1999,6 +1986,9 @@ function _cleanup_scaffold() {
             fi
         fi
     fi
+     if [[ -n "$_cleanup_scaffold_output" ]]; then
+        rm -f -- "$_cleanup_scaffold_output"
+    fi
 }
 
 function _cleanup_changes() {
@@ -2016,6 +2006,9 @@ function _cleanup_changes() {
                     --format '  {{.ID}}  {{.Names}}  {{.Status}}' >&2 || true
             fi
         fi
+    fi
+    if [[ -n "$_cleanup_changes_output" ]]; then
+        rm -f -- "$_cleanup_changes_output"
     fi
 }
 
@@ -2038,13 +2031,8 @@ function _cleanup_bg() {
             fi
         fi
     fi
-}
-
-# Remove the interactive workspace shell's rcfile.
-function _cleanup_repl() {
-    if [[ -n "$_cleanup_repl_rcfile" ]]; then
-        rm -f -- "$_cleanup_repl_rcfile"
-        _cleanup_repl_rcfile=""
+    if [[ -n "$_cleanup_bg_output" ]]; then
+        rm -f -- "$_cleanup_bg_output"
     fi
 }
 
@@ -2066,7 +2054,7 @@ function opencode() {
         # map, whereas .Labels from 'ps --format' can surface as a slice (indexing
         # a slice by string then fails), depending on the docker/compose build.
         running_ws="$(_find_workspace "$running_id")"
-        if [[ -n "$running_ws" && "$running_ws" != "$WORKSPACE" ]]; then
+        if [[ -n "$running_ws" && "$running_ws" != "$oc_workspace" ]]; then
             other_running=1
             break
         fi
@@ -2145,7 +2133,7 @@ function opencode() {
 # This function runs interactive commands within a running container
 # without creating a new container instance.
 function opencode:execute() {
-    echo "Executing in opencode project: $project_name ($WORKSPACE)"
+    echo "Executing in opencode project: $oc_project_name ($oc_workspace)"
 
     # Ensure the container is running before executing commands
     #_opencode_ensure_up
@@ -2160,7 +2148,6 @@ function opencode:execute() {
     _driver compose "${opencode_compose_args[@]}" exec -it opencode "$@"
 }
 
-# TODO Should this be allowed work worktree is not in-sync
 function opencode:shell() {
     opencode:execute sh "$@"
 }
@@ -2171,7 +2158,7 @@ function opencode:shell() {
 # running the task runs inside it (leaving it running); otherwise a throwaway
 # `compose run` container runs the task and exits, publishing no ports.
 function opencode:run() {
-    echo "Running in opencode project: $project_name ($WORKSPACE)"
+    echo "Running in opencode project: $oc_project_name ($oc_workspace)"
 
     if [ "$#" -gt 0 ]; then
         echo "Running command in the container"
@@ -2189,14 +2176,14 @@ function opencode:run() {
 # throwaway `compose run` container, then returns to the user shell while
 # leaving any pre-existing container running for later work.
 function opencode:setup() {
-    echo "Setting up opencode project: $project_name ($WORKSPACE)"
+    echo "Setting up opencode project: $oc_project_name ($oc_workspace)"
 
     _opencode_ensure_up || {
         echo "Failed to start the opencode container" >&2
         exit 1
     }
 
-    opencode:list "$WORKSPACE"
+    opencode:list "$oc_workspace"
 
     if [ "$#" -gt 0 ]; then
         echo "Running command in the container"
@@ -2264,8 +2251,8 @@ function _create_worktree() {
 
     # create is dispatched before the workspace is resolved, so the project name
     # is derived here the way main() derives it.
-    if [[ -z "$project_name" ]]; then
-        project_name="$(_sanitize_name "$(basename "$workspace")")"
+    if [[ -z "$oc_project_name" ]]; then
+        oc_project_name="$(_sanitize_name "$(basename "$workspace")")"
     fi
 
     local wstree_name="" wstree_root=""
@@ -2355,7 +2342,7 @@ function opencode:create() {
 # This function provides direct access to Docker Compose functionality
 # for advanced container management operations.
 function opencode:compose() {
-    echo "Running Docker Compose for project: $project_name ($WORKSPACE)"
+    echo "Running Docker Compose for project: $oc_project_name ($oc_workspace)"
 
     if [ "$#" == 0 ]; then
         echo "No arguments were provided."
@@ -2412,7 +2399,7 @@ function opencode:update() {
 # then stops any remaining managed containers (e.g. the TUI one-off) scoped to
 # the workspace, while preserving the workspace configuration.
 function opencode:down() {
-    echo "Stopping opencode project: $project_name ($WORKSPACE)"
+    echo "Stopping opencode project: $oc_project_name ($oc_workspace)"
 
     local all=0 other=0 quiet=0 dry_run=0 this=0
     local args=()
@@ -2432,7 +2419,7 @@ function opencode:down() {
     # docker compose down does not remove one-off containers created via
     # 'compose run' (like the TUI). Stop any remaining managed containers
     # scoped to this workspace.
-    local stop_args=("$WORKSPACE")
+    local stop_args=("$oc_workspace")
     ((dry_run)) && stop_args+=(--dry-run)
     opencode:stop "${stop_args[@]}"
 
@@ -2448,11 +2435,11 @@ function opencode:down() {
 # This is useful to keep the container alive in the background so it can be
 # attached to later with 'opencode:execute' without the overhead of creating it.
 function opencode:up() {
-    echo "Starting opencode container: $project_name ($WORKSPACE)"
+    echo "Starting opencode container: $oc_project_name ($oc_workspace)"
 
     _driver compose "${opencode_compose_args[@]}" up -d opencode "$@"
 
-    opencode:list "$WORKSPACE"
+    opencode:list "$oc_workspace"
 }
 
 # Write the name and the path of the project's agent worktree through the two
@@ -2465,13 +2452,13 @@ function opencode:up() {
 # compose project name is globally unique by container basename, so a container
 # for the worktree must not be named after the parent repository.
 function _get_worktree_info() {
-    if [[ -z "$project_name" ]]; then
+    if [[ -z "$oc_project_name" ]]; then
         echo "Error: no project name" >&2
         exit 1
     fi
     local -n tmp_wstree_name="$1"
     local -n tmp_wstree_root="$2"
-    tmp_wstree_name="$project_name-dev"
+    tmp_wstree_name="$oc_project_name-dev"
     tmp_wstree_root="$TREE_ROOT/$tmp_wstree_name"
 }
 
@@ -2525,7 +2512,7 @@ function opencode:uptree() {
     # basename constraint
     local wstree_name="" wstree_root=""
     _get_worktree_info wstree_name wstree_root
-    project_name="$wstree_name" # set the global
+    oc_project_name="$wstree_name" # set the global
 
     if [[ -d "$wstree_root" ]]; then
         local git_pointer="$wstree_root/.git"
@@ -2568,7 +2555,7 @@ function opencode:scaffold() {
         exit 1
     fi
 
-    echo "Running on opencode project: $project_name ($WORKSPACE)"
+    echo "Running on opencode project: $oc_project_name ($oc_workspace)"
 
     # Build context information for the opencode runner. Reduces execution
     # overhead and could eliminate a dependency on shell environment within the
@@ -2578,11 +2565,11 @@ function opencode:scaffold() {
 You are creating the inital project scaffold.
 The inital project information is as follows.
 $(_print_cpu_context)
-$CONTAINER_WORKSPACE_ROOT is the project: $project_name
+$CONTAINER_WORKSPACE_ROOT is the project: $oc_project_name
 Working directory: $CONTAINER_WORKSPACE_ROOT
 Workspace contents of $CONTAINER_WORKSPACE_ROOT:
 \`\`\`
-$(ls -la "$WORKSPACE")
+$(ls -la "$oc_workspace")
 \`\`\`
 $(_print_readme)
 $(_print_git_context)
@@ -2640,7 +2627,7 @@ function opencode:bg() {
         exit 1
     fi
 
-    echo "Running background task on opencode project: $project_name ($WORKSPACE)"
+    echo "Running background task on opencode project: $oc_project_name ($oc_workspace)"
 
     # Build context information for the opencode runner. Reduces execution
     # overhead and could eliminate a dependency on shell environment within the
@@ -2649,11 +2636,11 @@ function opencode:bg() {
     tmp_context="<task-information>
 You are running a task in the existing project.
 $(_print_cpu_context)
-$CONTAINER_WORKSPACE_ROOT is the project: $project_name
+$CONTAINER_WORKSPACE_ROOT is the project: $oc_project_name
 Working directory: $CONTAINER_WORKSPACE_ROOT
 Workspace contents of $CONTAINER_WORKSPACE_ROOT:
 \`\`\`
-$(ls -la "$WORKSPACE")
+$(ls -la "$oc_workspace")
 \`\`\`
 $(_print_readme)
 $(_print_git_context)
@@ -2703,7 +2690,7 @@ Your task is as follows:
 function opencode:new() {
     opencode:stop
 
-    echo "Starting fresh opencode container for project: $project_name"
+    echo "Starting fresh opencode container for project: $oc_project_name"
     opencode "$@"
 }
 
@@ -2804,8 +2791,8 @@ function _opencode_parse_flags() {
 # supersedes its parent), so --other preserves the container, image and network
 # of the workspace the user is actually working in.
 function _opencode_current_workspace() {
-    if [[ -n "${WORKSPACE:-}" ]]; then
-        printf '%s\n' "$WORKSPACE"
+    if [[ -n "${oc_workspace:-}" ]]; then
+        printf '%s\n' "$oc_workspace"
         return 0
     fi
 
@@ -2871,7 +2858,7 @@ function opencode:stop() {
     while read -r id; do
         [[ -z "$id" ]] && continue
         ws_label="$(_find_workspace "$id")"
-        if [[ -n "$ws_label" && "$ws_label" != "${WORKSPACE:-}" ]]; then
+        if [[ -n "$ws_label" && "$ws_label" != "${oc_workspace:-}" ]]; then
             echo "Stopping managed container $id (workspace: $ws_label)"
         else
             echo "Stopping managed container $id"
@@ -3208,7 +3195,7 @@ function opencode:changes() {
     # expected. For example, I might pull the changes into the parent repo, and
     # run changes on that. While having a worktree enabled. But in that case
     # does it use the worktree
-    echo "Analyzing changes for project: $project_name ($WORKSPACE)"
+    echo "Analyzing changes for project: $oc_project_name ($oc_workspace)"
 
     # Run the git analysis against the existing container when it is running,
     # otherwise a throwaway `compose run` container; either way the returned
@@ -3233,7 +3220,7 @@ function opencode:changes() {
     shift || true
 
     local prompt="<task-information>
-Project: $project_name
+Project: $oc_project_name
 Working directory: $CONTAINER_WORKSPACE_ROOT
 Branch changes:
 \`\`\`
@@ -3292,6 +3279,15 @@ function opencode:git() {
     git -C "$ws" "$@"
 }
 
+_repl_run_path=""
+
+function _cleanup_opencode_repl_run() {
+    if [[ -n "$_repl_run_path" &&  -f "$_repl_run_path" ]]; then
+        rm -- "$_repl_run_path"
+    fi
+}
+
+
 # Entry point for the bare-name aliases set up inside the interactive workspace
 # shell (_opencode_dispatch_shims). Maps a typed command to the matching
 # opencode:* function, forwarding any arguments, so calls like
@@ -3301,13 +3297,39 @@ function opencode:git() {
 function _opencode_shim() {
     local cmd="$1"
     shift
-    # Run in a subshell so a command's own 'exit' (e.g. opencode's failure
-    # paths) cannot terminate the interactive workspace shell itself.
-    case "$cmd" in
-    # 'start' is served by the main opencode() function, not opencode:start.
-    start) (opencode "$@") ;;
-    *) (opencode:"$cmd" "$@") ;;
-    esac
+
+    # Bail out rather than let an unset/empty runs dir turn the template below
+    # into "/<cmd>.XXXXX" (the filesystem root). Not fatal: this runs behind an
+    # alias in the interactive shell, which has to survive a bad command.
+    if [[ -z "${_oc_repl_parent_dir:-}" ]]; then
+        echo "$cmd: the repl runs directory is not set" >&2
+        return 1
+    fi
+
+    [[ ! -d "$_oc_repl_parent_dir" ]] && mkdir "$_oc_repl_parent_dir"
+
+    # mktemp needs at least six X's in the last component; with the five below
+    # busybox mktemp rejects the template outright ("Invalid argument"), so no
+    # repl command could record a run at all.
+    local run_path_tmp="$_oc_repl_parent_dir/$cmd.XXXXXX"
+    _repl_run_path="$(mktemp "$run_path_tmp")"
+
+    (
+        # traps inside subshell for proper cleanup and signal handling
+        _cleanup_stack=()
+        trap _cleanup_run EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        cleanup_add _cleanup_opencode_repl_run
+
+        # Run in a subshell so a command's own 'exit' (e.g. opencode's failure
+        # paths) cannot terminate the interactive workspace shell itself.
+        case "$cmd" in
+        # 'start' is served by the main opencode() function, not opencode:start.
+        start) opencode "$@" ;;
+        *) opencode:"$cmd" "$@" ;;
+        esac
+    )
 }
 
 # Define bare-name aliases (run, exec, up, ...) that forward to the opencode:*
@@ -3320,13 +3342,72 @@ function _opencode_shim() {
 function _opencode_dispatch_shims() {
     local cmd kind
     for cmd in \
-        start new up setup down delete list execute stop run shell scaffold bg \
+        start new up setup down delete list execute stop run shell scaffold bg git \
         changes compose update help; do
-        kind="$(type -t "$cmd" 2>/dev/null || true)"
-        if [[ -z "$kind" || "$kind" == "builtin" ]]; then
+        #kind="$(type -t "$cmd" 2>/dev/null || true)"
+        #if [[ -z "$kind" || "$kind" == "builtin" ]]; then
             BASH_ALIASES["$cmd"]="_opencode_shim $cmd"
-        fi
+        #fi
     done
+}
+
+_oc_repl_acquire() {
+    (
+        flock -x 200
+
+        # Don't acquire a deleted resource
+        if [[ ! -e "$_repl_global_project_dir" ]]; then
+            echo "file doesn't exist"
+            exit 1
+        fi
+
+        # Read into a separately declared variable: 'local count=$(<...)' swallows
+        # the read's status, so errexit cannot catch a missing file.ref and the
+        # empty value is then counted as zero.
+        local count
+        count=$(<"$_oc_repl_ref_global")
+        echo $((count + 1)) > "$_oc_repl_ref_global"
+    ) 200>"$_oc_repl_lock_global"
+}
+
+_oc_repl_release() {
+    (
+        flock -x 200
+
+        # Kept separate from the declaration for the same reason as in
+        # _oc_repl_acquire: a failed read must abort rather than decrement an
+        # empty value to -1, which never reaches 0 and so leaves the global
+        # directory behind (and recreates the ref file the cleanup removes).
+        local count
+        count=$(<"$_oc_repl_ref_global")
+        count=$((count - 1))
+        echo "$count" > "$_oc_repl_ref_global"
+
+        if (( count == 0 )) ; then
+            rm -fr -- "$_repl_global_project_dir" "$_oc_repl_ref_global"
+
+            # clean global dir if its empt
+            rmdir "$_tmp_repl_global_dir" 2>/dev/null
+        fi
+    ) 200>"$_oc_repl_lock_global"
+}
+
+# Remove the interactive workspace shell's rcfile.
+function _cleanup_repl() {
+    if [[ -n "$_cleanup_repl_rcfile" ]]; then
+        rm -f -- "$_cleanup_repl_rcfile"
+        _cleanup_repl_rcfile=""
+    fi
+
+    _oc_repl_release
+}
+
+function _oc_repl_prompt() {
+    local run_count
+    run_count=$(find "$_oc_repl_parent_dir" -maxdepth 1 -type f 2>/dev/null | wc -l)
+
+    printf '%s' \
+        '\[\e[38;5;46m\]⌂ '"$oc_project_name"'\[\e[38;5;39m\]   ⚡ \[\e[38;5;214m\]tasks: '"$run_count"'\[\e[0m\]\n\[\e[38;5;39m\]❯ \[\e[0m\]'
 }
 
 # Launch a real interactive bash shell bound to the workspaceEvery opencode
@@ -3343,28 +3424,39 @@ function _opencode_dispatch_shims() {
 # still needs no context: compose args are prepared here exactly like the other
 # commands, and the rcfile reuses them instead of recomputing per command.
 #
-# FEATURE: Should this call the uptree command before entering the repl.
-# brining the projects container up first
+# FEATURE: repl, instead of doing the source, we can instead modify the
+# environment variables because we are sourcing the script. In the repl
+# _last_workspace_session=ilwlfnwefn
+# FEATURE: while a repl is open, should the opencode server stay open? At least
+# if started once. Closing the server on exit
 function custom_repl() {
     local ws="$1"
     shift || true
-    if ! _check_within_workspace "$ws"; then
+
+    # Prepare the compose args and OPENCODE_ARGS in the current shell so the
+    # dispatched command and its helpers can use them, then run the command in a
+    # subshell so its traps and cwd changes do not leak into the launcher.
+    local has_parent=""
+    local ws_out="$ws"
+    _resolve_effective_workspace ws_out has_parent
+
+    # first workspace, $second_workspace, $has_parent
+    if ! _check_within_workspace "$ws" "$ws_out" "$has_parent"; then
         _assert_continue_outside_workspace "$ws"
     fi
 
     # main() sets PROJECT_NAME before dispatching, but keep this self-sufficient
     # so direct calls behave the same as the other commands.
-    if [[ -z "$project_name" ]]; then
-        project_name="$(basename "$ws")"
+    if [[ -z "$oc_project_name" ]]; then
+        oc_project_name="$(basename "$ws")"
     fi
 
+
     local -a args=()
-    local has_parent
-    _resolve_effective_workspace ws has_parent
-    _opencode_args_prepare "$ws" "$has_parent" args || return 1
-    cleanup_add _cleanup
+    _opencode_args_prepare "$ws_out" "$has_parent" args || return 1
 
     opencode_compose_args=("${args[@]}")
+    ws="$ws_out"
 
     # Resolve the launcher's own path so the rcfile can 'source' it for the
     # opencode:* definitions. The entry-point guard at the bottom stops main()
@@ -3376,10 +3468,27 @@ function custom_repl() {
         launcher_path="$0"
     fi
 
+    cleanup_add _cleanup_repl
+
+    _cleanup_repl_rcfile="$(mktemp "${tmp_sd_root_dir}/opencode-repl.XXXXXX")" || return 1
+
+    _tmp_repl_global_dir="/tmp/ocsd-info"
+    _repl_global_project_dir="$_tmp_repl_global_dir/$oc_project_name"
+    _oc_repl_ref_global="$_repl_global_project_dir/file.ref"
+    _oc_repl_lock_global="$_repl_global_project_dir/file.lock"
+
+    # The runs directory the interactive shell records live commands in, read by
+    # _opencode_shim and _oc_repl_prompt. Assigned here as well as in the rcfile
+    # below (the shell is a separate process and cannot inherit this), so it is
+    # always a real path: left empty, the shim's mktemp template collapses to
+    # "/<cmd>.XXXXX" and lands in the filesystem root.
+    _oc_repl_parent_dir="$_repl_global_project_dir/runs"
+    [[ ! -d "$_oc_repl_parent_dir" ]] && mkdir -p "$_oc_repl_parent_dir"
+    [[ ! -e "$_oc_repl_ref_global" ]] && echo 0 > "$_oc_repl_ref_global"
+    _oc_repl_acquire
+
     # Build the interactive shell's rcfile. Contrived values are embedded with
     # %q so paths/names with spaces survive re-parsing inside the shell.
-    _cleanup_repl_rcfile="$(mktemp "${tmp_sd_root_dir}/opencode-repl.XXXXXX")" || return 1
-    cleanup_add _cleanup_repl
     {
         printf '%s\n' '# Auto-generated interactive opencode workspace shell. Do not edit.'
         printf 'source %s\n' "$(printf '%q' "$launcher_path")"
@@ -3387,11 +3496,15 @@ function custom_repl() {
         printf '%s\n' 'set +o pipefail'
         # Interactive signal handling: restore defaults so Ctrl+C interrupts the
         # running foreground job instead of exiting the shell.
-        printf '%s\n' 'trap - EXIT INT TERM'
+        printf '%s\n' 'cleanup_add _cleanup'
+        printf '%s\n' 'trap _cleanup_run EXIT'
+        printf '%s\n' 'trap - INT TERM'
+        printf 'oc_workspace=%s\n' "$(printf '%q' "$ws")"
         printf 'WORKSPACE=%s\n' "$(printf '%q' "$ws")"
-        printf 'PROJECT_NAME=%s\n' "$(printf '%q' "$project_name")"
-        printf '%s\n' 'export WORKSPACE PROJECT_NAME'
-        printf 'declare -a OPENCODE_ARGS=(\n'
+        printf 'oc_project_name=%s\n' "$(printf '%q' "$oc_project_name")"
+        printf '_oc_repl_parent_dir=%s\n' "$(printf '%q' "$_oc_repl_parent_dir")"
+        printf '%s\n' 'export oc_workspace oc_project_name WORKSPACE'
+        printf 'declare -a opencode_compose_args=(\n'
         local arg
         for arg in "${args[@]}"; do
             printf '  %s\n' "$(printf '%q' "$arg")"
@@ -3408,13 +3521,12 @@ function custom_repl() {
         printf '  echo "warning: %s not on PATH - opencode docker commands will fail" >&2\n' "$(printf '%q' "$DRIVER")"
         printf '%s\n' 'fi'
         printf '%s\n' '_opencode_dispatch_shims'
-        printf 'PS1=%s\n' "$(printf '%q' "$project_name> ")"
+        # Single quotes on purpose: this is a line of rcfile source that the
+        # child shell expands when it reads the rcfile. Double quotes would run
+        # _oc_repl_prompt here, at rcfile-generation time.
+        # shellcheck disable=SC2016
+        printf '%s\n' 'PS1=$(_oc_repl_prompt)'
         printf '%s\n' 'unset -f _opencode_dispatch_shims 2>/dev/null || true'
-        #printf '%s\n' 'unset PATH'
-        #printf 'alias docker="%s"\n' "$(which docker)"
-        #printf 'alias sort="%s"\n' "$(which sort)"
-        #printf 'alias mktemp="%s"\n' "$(which mktemp)"
-        #printf 'alias rm="%s"\n' "$(which rm)"
     } >"$_cleanup_repl_rcfile"
 
     echo "                               .___                     .___           "
@@ -3424,10 +3536,11 @@ function custom_repl() {
     echo "/____  >___|  /\____/ \/\_/\____ |\____/|___|  / /\ \____ |\___  >\_/  "
     echo "     \/     \/                  \/           \/  \/      \/    \/      "
     echo
-    echo "Interactive opencode shell for $ws (project: $project_name)"
+    echo "Interactive opencode shell for $ws (project: $oc_project_name)"
     echo "  type 'run <cmd>', 'exec <cmd>', 'opencode:list --all', or 'help'"
     echo "  type 'exit' to leave the shell"
-    echo "  repl is in development, so be careful."
+    echo "  repl is in development, so be careful. It is just a source of the script."
+    echo "  Modifying variables could kill you"
 
     bash --rcfile "$_cleanup_repl_rcfile" -i
     return $?
@@ -4053,9 +4166,9 @@ function main() {
     # conflicts when different directories share the same final component.
     #
     # Set up compose directory and project name
-    project_name="$(_sanitize_name "$(basename "$ws_out")")"
+    oc_project_name="$(_sanitize_name "$(basename "$ws_out")")"
     echo "Starting workspace: $ws_out"
-    echo "Starting project: $project_name"
+    echo "Starting project: $oc_project_name"
 
     # Dispatch to the appropriate command handler
     case "$cmd" in

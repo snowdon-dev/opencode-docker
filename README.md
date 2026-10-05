@@ -31,10 +31,14 @@ directory. Every command has its own help: `opencode:help <command>` or
 | Command | Alias | Purpose |
 |---------|-------|---------|
 | `opencode` (`start`) | `oc` | (Re)create the container and attach a TUI |
+| `opencode:scaffold [path] <task>` | `ocsf` | Create a new project with opencode (task via stdin) |
+| `opencode:bg [path] <task>` | `ocbg` | Run a one-off opencode task (an opencode run in the service) on an existing project |
+| `opencode:changes [task]` | `occh` | Analyse the branch changes and propose a plan |
 | `opencode:new` | `ocn` | Stop existing containers, then start a fresh session |
 | `opencode:up` | `ocu` | Start the container in the background, running nothing |
 | `opencode:setup <cmd>` | `ocset` | Start the container if needed, then run a command in it |
-| `opencode:run <cmd>` | `ocr` | Run a task in the service, one-off container if not running |
+| `opencode:uptree` | `ocut` | Start a container for an existing agent worktree |
+| `opencode:run <cmd>` | `ocr` | Run a task (docker task, docker run) in the service, one-off container if not running |
 | `opencode:exec <cmd>` | `oce` | Run a command interactively in the running container |
 | `opencode:shell` | `ocsh` | `exec sh` |
 | `opencode:repl` | `ocrepl` | Interactive bash shell bound to the workspace |
@@ -46,10 +50,6 @@ directory. Every command has its own help: `opencode:help <command>` or
 | `opencode:git <args>` | `ocg` | Run git on the host, in the workspace |
 | `opencode:env` | `ocenv` | Print the launcher variables set in your environment (`SD_*`, `OPENCODE_*`) |
 | `opencode:create <action>` | `occre` | Create a workspace asset on the host (`--dockerfile`, `--worktree`) |
-| `opencode:uptree` | `ocut` | Start a container for an existing agent worktree |
-| `opencode:scaffold [path] <task>` | `ocsf` | Create a new project with opencode (task via stdin) |
-| `opencode:bg [path] <task>` | `ocbg` | Run a one-off opencode task on an existing project |
-| `opencode:changes [task]` | `occh` | Analyse the branch changes and propose a plan |
 | `opencode:update` | `ocud` | Refresh the launcher repo and its images |
 | `opencode:help [command]` | `och` | Show help, or help for one command |
 
@@ -121,6 +121,10 @@ opencode:create --dockerfile --worktree && opencode:uptree
 # run on another base image, or pin and cap the CPUs
 OPENCODE_IMAGE_URL="devsnowdon/opencode-docker:full-v1" opencode
 OPENCODE_CPUSET="2-3" OPENCODE_CPUS="2" opencode
+
+# using opencode v2
+OPENCODE_IMAGE_URL="devsnowdon/opencode-docker:empty-v2" \
+OPENCODE_IMAGE_URL_TUI="devsnowdon/opencode-docker:empty-v2" opencode
 ```
 
 ## Install
