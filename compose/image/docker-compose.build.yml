@@ -14,3 +14,19 @@ services:
                 # repository still finds this image once the worktree's container
                 # is gone. See Dockerfile.example.
                 PROJECT_WORKSPACE_PARENT: ${WORKSPACE_PARENT:-}
+            # The labels the resource queries select images by (see
+            # _ws_resource_ls), applied by the builder itself instead of through
+            # the workspace's Dockerfile. That Dockerfile is the project's own
+            # file, frequently multi-stage (a toolchain builder stage next to
+            # the base), and the ARG/LABEL pair of Dockerfile.example then
+            # easily lands in a stage the final image never inherits from - an
+            # ARG does not cross stages - which bakes the labels empty and
+            # hides the image from a delete scoped to its workspace. Labels of
+            # the build request are merged into the final image config after
+            # every Dockerfile LABEL, so these win whatever the workspace's
+            # Dockerfile does. The values interpolate from the same WORKSPACE /
+            # WORKSPACE_PARENT the container's own labels take, so one query
+            # string matches containers, images and networks alike.
+            labels:
+                dev.snowdon.opencode.workspace: "${WORKSPACE}"
+                dev.snowdon.opencode.workspace_parent: "${WORKSPACE_PARENT:-}"

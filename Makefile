@@ -203,8 +203,11 @@ builder:
 		docker buildx create --name $(BUILDER) --driver docker-container --bootstrap --use
 
 # Run the launcher unit tests against a mocked docker (no docker required).
+# The suites live in tests/*.bats, grouped to mirror the README command
+# groups; helpers and assertions are in tests/lib/helpers.bash.
 test:
-	./tests/run_tests.sh
+	@command -v bats >/dev/null 2>&1 || { echo "Error: bats (bats-core) is required to run the tests" >&2; exit 1; }
+	bats tests/
 
 .PHONY: check
 check:
@@ -212,7 +215,8 @@ check:
 		scripts/waitforserver.sh \
 		scripts/start-serve-backend.sh \
 		scripts/v1/start-tui.sh \
-		scripts/v2/start-tui.sh
+		scripts/v2/start-tui.sh \
+		tests/lib/helpers.bash
 
 # In-place formatting for local dev. The read-only `check` target is what CI
 # runs; the pipeline never rewrites the tree.
@@ -222,14 +226,17 @@ format:
 
 # Bash syntax-check every shell script (parse errors, not semantics). bin/ holds
 # the helpers the update and build workflows run; they are parse-checked here
-# rather than unit-tested, since tests/ covers the launcher.
+# rather than unit-tested, since tests/ covers the launcher. The Bats suites are
+# not valid bash for `bash -n`, so they get a parse check through bats itself.
 .PHONY: syntax
 syntax:
 	bash -n scripts/launcher.sh scripts/setup.sh scripts/waitforserver.sh \
+		scripts/start-serve-backend.sh \
 		scripts/v1/start-tui.sh scripts/v2/start-tui.sh \
 		bin/resolve-opencode-version.sh bin/compare-opencode-version.sh \
-		tests/run_tests.sh tests/mockbin/docker tests/mockbin/opencode \
-		tests/mockbin/curl
+		tests/lib/helpers.bash tests/mockbin/docker \
+		tests/mockbin/opencode tests/mockbin/curl
+	@bats --count tests
 
 # Formatting test against .editorconfig. The checker binary is installed as
 # `editorconfig-checker` by `go install` but as `ec` by the Alpine package, so

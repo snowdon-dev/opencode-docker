@@ -1,12 +1,12 @@
 ---
-name: Available bash tools (full)
+name: available-full-tools
 description: Bash tools available in the `full` container image, grouped by purpose, with the verified version flag for each
 ---
 
 The `full` image is the `duck` base (which is itself the `empty` base) plus Go
 and, when built with `INSTALL_RUST=true`, the Rust toolchain. All `duck` and
-`empty` tools are present here too; see `available-empty-tools.md` for the
-full system tool reference.
+`empty` tools are present here too; see the `available-empty-tools` skill for
+the full system tool reference.
 
 Core:
 - `git --version` — version control

@@ -12,6 +12,14 @@
 #   compose exec ... curl ...      -> fails when OPENCODE_TEST_HEALTH_FAIL=1,
 #                                     i.e. the in-container health probe says
 #                                     "backend not up"
+#   compose run ...                -> reads the prompt the launcher pipes in and
+#                                     records it as one escaped "stdin: ..." log
+#                                     line; when the container runs an io-style
+#                                     one-off (io, changes --output) and
+#                                     OPENCODE_TEST_IO_OUTPUT is set, writes
+#                                     OPENCODE_TEST_IO_PLAN (default "mocked io
+#                                     plan") into each listed output, standing
+#                                     in for the agent writing the files
 set -u
 
 OPENCODE_TEST_DOCKER_LOG="${OPENCODE_TEST_DOCKER_LOG:-}"
@@ -63,6 +71,10 @@ if [[ "${1:-}" == "compose" && -n "${WORKSPACE_PARENT:-}" ]]; then
 else
     mock_log "docker $*"
 fi
+
+# The invocation as given, kept before the parsing below consumes it: the io
+# write-back keys off the container name, which the flag-skipping loops eat.
+MOCK_RAW_ARGS="$*"
 
 # Determine the compose subcommand (first positional that is not a flag).
 if [[ "$1" == "compose" ]]; then
@@ -125,6 +137,42 @@ if [[ "$1" == "compose" ]]; then
         else
             echo "mocked: run ${*}"
         fi
+        # The launcher pipes the task prompt to the container on stdin (bg,
+        # scaffold, io). Read it back and record it as a single line with its
+        # newlines escaped, so a test can assert which prompt a run was given
+        # without breaking the one-command-per-line log.
+        if [[ ! -t 0 ]]; then
+            _mock_stdin="$(cat)"
+            if [[ -n "$_mock_stdin" ]]; then
+                mock_log "stdin: ${_mock_stdin//$'\n'/\\n}"
+            fi
+        fi
+        # io-style runs (io, and changes --output): the one-off container's job
+        # is to write into the outputs the io override mounts read-write. The
+        # mock never runs opencode, so it writes those files itself when a test
+        # points at them - gated on the one-off container name, so a leftover
+        # variable cannot make an unrelated `compose run` write anywhere. The
+        # launcher prepares the outputs before the run (files truncated,
+        # directories mkdir'd) and only accepts a non-empty result after it.
+        # OPENCODE_TEST_IO_OUTPUT is a newline-separated list (one entry per
+        # output); a directory entry gets a file written inside it.
+        if [[ ("$MOCK_RAW_ARGS" == *oc-io-* || "$MOCK_RAW_ARGS" == *oc-changes-*) &&
+            -n "${OPENCODE_TEST_IO_OUTPUT:-}" ]]; then
+            while IFS= read -r _mock_io_path; do
+                [[ -n "$_mock_io_path" ]] || continue
+                if [[ -d "$_mock_io_path" ]]; then
+                    (
+                        printf '%s\n' "${OPENCODE_TEST_IO_PLAN:-mocked io plan}" \
+                            >"$_mock_io_path/mock-output.md"
+                    ) 2>/dev/null || true
+                else
+                    (
+                        printf '%s\n' "${OPENCODE_TEST_IO_PLAN:-mocked io plan}" \
+                            >"$_mock_io_path"
+                    ) 2>/dev/null || true
+                fi
+            done <<<"${OPENCODE_TEST_IO_OUTPUT}"
+        fi
         ;;
     port)
         # Simulate `docker compose port opencode 4096`, which prints the host
@@ -147,18 +195,19 @@ elif [[ "$1" == "ps" ]]; then
         exit 0
     fi
     # A discovery scoped to the worktree-parent label finds the worktree-child
-    # container when the test scripts one (OPENCODE_TEST_WORKTREE_CHILD, whose
-    # parent is the current directory); otherwise it finds nothing — fresh test
-    # sandboxes have no worktree-child containers. Honouring the filter keeps the
-    # launcher's worktree-child detection in _opencode_args_prepare from
-    # mis-reading the generic "c1" mock container as a worktree of the sandbox
-    # workspace (which would clobber the project name).
+    # containers when the test scripts them (OPENCODE_TEST_WORKTREE_CHILD, a
+    # space-separated id list, whose parent is the current directory); otherwise
+    # it finds nothing — fresh test sandboxes have no worktree-child containers.
+    # Honouring the filter keeps the launcher's worktree-child detection in
+    # _opencode_args_prepare from mis-reading the generic "c1" mock container as
+    # a worktree of the sandbox workspace (which would clobber the project name).
     prev=""
     for a in "$@"; do
         if [[ "$prev" == "--filter" && "$a" == "label=dev.snowdon.opencode.parent="* ]]; then
             if [[ -n "${OPENCODE_TEST_WORKTREE_CHILD:-}" &&
                 "${a#label=dev.snowdon.opencode.parent=}" == "$PWD" ]]; then
-                echo "$OPENCODE_TEST_WORKTREE_CHILD"
+                # One id per line, as docker ps -q prints them.
+                printf '%s\n' ${OPENCODE_TEST_WORKTREE_CHILD}
             fi
             exit 0
         fi
@@ -177,7 +226,8 @@ elif [[ "$1" == "ps" ]]; then
     if [[ "$quiet" == "1" ]]; then
         echo "c1"
         if [[ -n "${OPENCODE_TEST_WORKTREE_CHILD:-}" ]]; then
-            echo "$OPENCODE_TEST_WORKTREE_CHILD"
+            # One id per line, as docker ps -q prints them.
+            printf '%s\n' ${OPENCODE_TEST_WORKTREE_CHILD}
         fi
         exit 0
     elif [[ "${OPENCODE_TEST_CONFLICT:-}" == "1" ]]; then
@@ -190,13 +240,20 @@ elif [[ "$1" == "inspect" ]]; then
     shift
     # Every container inspect goes through the launcher's _container_info /
     # _container_infos helpers, whose tab-separated record is: id, status,
-    # workspace, project, oneoff, tui, parent, sentinel. The trailing '.' keeps
-    # empty trailing label columns in place through the launcher's `read -a`
-    # splitting. With OPENCODE_TEST_CONFLICT=1 the workspace resolves to a
+    # workspace, project, oneoff, tui, parent, sentinel; the launcher splits it
+    # with _rec_fields, which preserves empty columns. With
+    # OPENCODE_TEST_CONFLICT=1 the workspace resolves to a
     # different path so the launcher can see a coexisting container and warn
-    # about it. The scripted worktree-child container
-    # (OPENCODE_TEST_WORKTREE_CHILD) resolves to OPENCODE_TEST_WORKTREE_CHILD_PATH
-    # with its parent repo ($PWD).
+    # about it. The scripted worktree-child containers
+    # (OPENCODE_TEST_WORKTREE_CHILD, space-separated ids) resolve to
+    # OPENCODE_TEST_WORKTREE_CHILD_PATH with their parent repo ($PWD).
+    #
+    # The tui column is deliberately EMPTY for these main containers, like real
+    # docker inspect output: only the tui service carries
+    # dev.snowdon.opencode.tui (docker-compose.yml), so
+    # {{index .Config.Labels "dev.snowdon.opencode.tui"}} renders as an empty
+    # column for every other container. Printing a value there would hide
+    # record-parsing bugs that only bite when a column is empty.
     #
     # The launcher batches the listing's discovery into a single
     # `docker inspect --format <template> <id>...` call, and inspects single ids
@@ -204,11 +261,13 @@ elif [[ "$1" == "inspect" ]]; then
     [[ "$1" == "--format" ]] && shift 2
     cid=""
     for cid in "$@"; do
-        if [[ -n "${OPENCODE_TEST_WORKTREE_CHILD:-}" && "$cid" == "$OPENCODE_TEST_WORKTREE_CHILD" ]]; then
-            printf '%s\t%s\t%s\t%s\tfalse\tfalse\t%s\t.\n' \
-                "$cid" "running" "$OPENCODE_TEST_WORKTREE_CHILD_PATH" "wt-proj" "$PWD"
-            continue
-        fi
+        for child in ${OPENCODE_TEST_WORKTREE_CHILD:-}; do
+            if [[ "$cid" == "$child" ]]; then
+                printf '%s\t%s\t%s\t%s\tfalse\t\t%s\t.\n' \
+                    "$cid" "running" "$OPENCODE_TEST_WORKTREE_CHILD_PATH" "wt-proj" "$PWD"
+                continue 2
+            fi
+        done
         ws="$PWD"
         if [[ "${OPENCODE_TEST_CONFLICT:-}" == "1" ]]; then
             ws="/workspace/other"
@@ -300,6 +359,75 @@ elif [[ "$1" == "network" && "${2:-}" == "ls" ]]; then
     else
         mock_ls_filter "" "" "${OPENCODE_TEST_NETWORKS:-}"
     fi
+    exit 0
+elif [[ "$1" == "network" && "${2:-}" == "create" ]]; then
+    # docker network create [flags] <name>: succeeds unless the test scripts a
+    # failure (OPENCODE_TEST_NETWORK_CREATE_FAIL=1), which is how
+    # _explain_network_create_failure is reached. The error mirrors docker's
+    # own wording for the duplicate-name case and, like docker's, goes to
+    # stderr, where the launcher leaves it.
+    if [[ "${OPENCODE_TEST_NETWORK_CREATE_FAIL:-}" == "1" ]]; then
+        echo "Error response from daemon: network with name ${!#} already exists" >&2
+        exit 1
+    fi
+    exit 0
+elif [[ "$1" == "network" && "${2:-}" == "inspect" ]]; then
+    # docker network inspect <id-or-name> --format <template>
+    # Scripted by OPENCODE_TEST_NETWORK_NAME_MAP, a "<id-or-name>=<workspace>"
+    # list of the networks that exist; an empty workspace (name=) stands for a
+    # network the launcher did not create, so it carries no workspace label.
+    # The launcher reads a network's name ({{.Name}}) and its workspace label
+    # (an index of dev.snowdon.opencode.workspace) back from these templates: a
+    # target outside the map fails like docker's "no such network", and any
+    # other template keeps the old unhandled answer, which is how the IPAM
+    # subnet listing (find_free_network) still sees nothing usable.
+    mock_net_orig="$*"
+    shift 2
+    mock_net_fmt=""
+    mock_net_target=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        --format)
+            mock_net_fmt="${2:-}"
+            shift 2
+            ;;
+        --format=*)
+            mock_net_fmt="${1#--format=}"
+            shift
+            ;;
+        -*)
+            shift
+            ;;
+        *)
+            mock_net_target="$1"
+            shift
+            ;;
+        esac
+    done
+    mock_net_found=0
+    mock_net_owner=""
+    for mock_net_entry in ${OPENCODE_TEST_NETWORK_NAME_MAP:-}; do
+        if [[ "${mock_net_entry%%=*}" == "$mock_net_target" ]]; then
+            mock_net_found=1
+            mock_net_owner="${mock_net_entry#*=}"
+            break
+        fi
+    done
+    if [[ "$mock_net_found" -eq 0 ]]; then
+        echo "Error: No such network: $mock_net_target" >&2
+        exit 1
+    fi
+    case "$mock_net_fmt" in
+    *'{{.Name}}'*)
+        printf '%s\n' "$mock_net_target"
+        ;;
+    *dev.snowdon.opencode.workspace*)
+        printf '%s\n' "$mock_net_owner"
+        ;;
+    *)
+        echo "mocked: unknown $mock_net_orig"
+        ;;
+    esac
     exit 0
 else
     echo "mocked: unknown $*"

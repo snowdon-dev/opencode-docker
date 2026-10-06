@@ -1,5 +1,5 @@
 ---
-name: Available bash tools (empty)
+name: available-empty-tools
 description: Bash tools available in the `empty` container image, grouped by purpose, with the verified version flag for each
 ---
 

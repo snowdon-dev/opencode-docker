@@ -1,5 +1,14 @@
 #!/bin/sh
 
+# Print a git command before running it, so the report shows which commands
+# produced the output below. Only the commands whose output reaches stdout go
+# through it: the counting helpers are captured by the script and stay out of
+# the report, their numbers are not commands the reader needs to see.
+run() {
+    printf '$ %s\n' "$*"
+    "$@"
+}
+
 upstream=$(git rev-parse --abbrev-ref @{upstream} 2>/dev/null || true)
 echo "Branch: $(git branch --show-current 2>/dev/null || echo detached)"
 
@@ -11,14 +20,14 @@ if [ -n "$upstream" ]; then
 
     total_added=$((added + working_added + staged_added))
     if [ "$total_added" -gt 500 ]; then
-        git diff --stat "$upstream"...HEAD
-        git diff --stat --cached
-        git diff --stat
+        run git diff --stat "$upstream"...HEAD
+        run git diff --stat --cached
+        run git diff --stat
     else
         # Show all changes: committed + staged + unstaged
-        git diff "$upstream"...HEAD
-        git diff --cached
-        git diff
+        run git diff "$upstream"...HEAD
+        run git diff --cached
+        run git diff
     fi
 else
     added=$(git diff --numstat | awk "{sum += \$1} END {print sum+0}")
@@ -26,13 +35,13 @@ else
 
     total_added=$((added + staged_added))
     if [ "$total_added" -gt 500 ]; then
-        git diff --stat --cached
-        git diff --stat
+        run git diff --stat --cached
+        run git diff --stat
     else
-        git diff --cached
-        git diff
+        run git diff --cached
+        run git diff
     fi
 fi
 
 echo "Untracked files:"
-git ls-files --others --exclude-standard
+run git ls-files --others --exclude-standard

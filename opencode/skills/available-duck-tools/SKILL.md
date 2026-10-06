@@ -1,10 +1,10 @@
 ---
-name: Available bash tools (duck)
+name: available-duck-tools
 description: Bash tools available in the `duck` container image, grouped by purpose, with the verified version flag for each
 ---
 
 The `duck` image is the `empty` base plus Python and Node.js. All `empty`
-tools are present here too; see `available-empty-tools.md` for the
+tools are present here too; see the `available-empty-tools` skill for the
 full system tool reference.
 
 Core:
@@ -40,13 +40,3 @@ Linting and CI:
 
 GitHub:
 - `gh --version` — GitHub CLI
-
-Python:
-- `python3 --version`
-- `pip3 --version`
-
-Node.js:
-- `node --version`
-- `npm --version`
-
-Not available here: the Go and Rust toolchains live in the `full` image.

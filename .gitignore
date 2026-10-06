@@ -1,3 +1,8 @@
 .env
 
 /Dockerfile
+
+# Host key files: the api key the launcher mounts as a compose secret
+# (compose/secret/docker-compose.secret.yml falls back to ./secrets/api_key).
+/secrets/
+/tasks

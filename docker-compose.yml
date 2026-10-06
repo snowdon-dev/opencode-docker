@@ -16,7 +16,7 @@ services:
             - /etc/localtime:/etc/localtime:ro
 
             # opencode
-            - ${OPENCODE_CACHE_DIR:-${HOME}/.cache/opencode/cache}:/home/other/.cache/opencode/cache
+            - ${OPENCODE_CACHE_DIR:-${HOME}/.cache/opencode}:/home/other/.cache/opencode/cache
             - ${OPENCODE_DATA_DIR:-${HOME}/.local/share/opencode}:/home/other/.local/share/opencode
             - ${OPENCODE_CONFIG_DIR:-${HOME}/.config/opencode}:/home/other/.config/opencode
 

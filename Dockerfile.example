@@ -29,7 +29,11 @@ ARG OPENCODE_IMAGE_URL=devsnowdon/opencode-docker:full-v1
 FROM ${OPENCODE_IMAGE_URL}
 # Both args are build args of compose/image/docker-compose.build.yml, so the
 # labels below record which workspace (and which worktree parent repository) the
-# image belongs to. ARG must be declared after FROM to be usable in a stage.
+# image belongs to. ARG must be declared after FROM to be usable in a stage:
+# an ARG in another stage does not carry over, and the label then builds empty.
+# The launcher applies the same two labels through the build config itself
+# (build.labels in the compose build file), which overrides the values below,
+# so these only label an image built outside compose (plain `docker build`).
 ARG PROJECT_WORKSPACE
 ARG PROJECT_WORKSPACE_PARENT
 LABEL dev.snowdon.opencode.workspace="${PROJECT_WORKSPACE}"

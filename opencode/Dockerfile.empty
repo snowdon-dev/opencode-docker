@@ -24,7 +24,9 @@ RUN addgroup -g $USER_GID $USERNAME \
         /home/$USERNAME/.local/state \
         /home/$USERNAME/.local/share \
         /home/$USERNAME/.config \
-    && chown -R $USER_UID:$USER_GID /home/$USERNAME
+        /opt/opencode/skills \
+    && chown -R $USER_UID:$USER_GID /home/$USERNAME \
+    && chown -R $USER_UID:$USER_GID /opt/opencode
 
 # ------------------------------------------------------------
 # Packages setup
@@ -97,6 +99,8 @@ ENV XDG_DATA_HOME="/home/${USERNAME}/.local/share"
 ENV XDG_CACHE_HOME="/home/${USERNAME}/.cache"
 ENV XDG_CONFIG_HOME="/home/${USERNAME}/.config"
 
+
 # Workspace used by opencode
 WORKDIR /workspace/project
 ENV HOME=/home/$USERNAME
+ENV OPENCODE_CONFIG_DIR=/opt/opencode

@@ -10,50 +10,71 @@
 | v2 | ![size](https://img.shields.io/docker/image-size/devsnowdon/opencode-docker/empty-v2) | ![size](https://img.shields.io/docker/image-size/devsnowdon/opencode-docker/duck-v2) | ![size](https://img.shields.io/docker/image-size/devsnowdon/opencode-docker/full-v2) |
 | v1 | ![size](https://img.shields.io/docker/image-size/devsnowdon/opencode-docker/empty-v1) | ![size](https://img.shields.io/docker/image-size/devsnowdon/opencode-docker/duck-v1) | ![size](https://img.shields.io/docker/image-size/devsnowdon/opencode-docker/full-v1) |
 
-A security and human-control oriented [opencode](https://opencode.ai) workflow
-that runs in Docker containers. The current project bind-mounted at
-`/workspace/project`, plus persistent caches for full language toolchains installed in
-the image (Go, Rust, Node, Python). All features are security first with
-convenience opts in.
+OpenCode doesn’t impose an opinion on the sandbox its agents run in. A
+sandboxed launcher gives you a secure, controlled environment that still lets
+agents work with the permissions they need.
 
-This project has been designed for arm architecture devices like the [Raspberry
-Pi](https://www.raspberrypi.com/). However, it should be compatible with x86.
+Snowdon Dev's `opencode-docker` is a security- and human-control-oriented
+[OpenCode](https://opencode.ai) workflow that runs inside Docker containers.
+It lets you manage multiple agents, including sub-agents, across distinct
+worktrees of your repository library, all through a simple CLI. Your project
+is available in the container at `/workspace/project`, and toolchain caches
+(Go, Rust, Node.js, Python) persist between runs.
 
-The version of opencode is best-effort and updated periodically (weekly), feel
-free to file an issue if it is out-of-date. See [Build](#build) section.
+Every feature is security-first, and convenience features are opt-in. Built
+for arm devices like the [Raspberry Pi](https://www.raspberrypi.com/) but
+compatible with x86 and others — please report any issues you find. The
+opencode version is updated weekly, best-effort; file an issue if yours is out
+of date. See [Build](#build).
 
 ## Commands
 
+<details>
+<summary>View command list</summary>
 Run commands through the launcher; the workspace defaults to the current
 directory. Every command has its own help: `opencode:help <command>` or
 `opencode:<command> -h`.
 
 | Command | Alias | Purpose |
 |---------|-------|---------|
+| **Start & one-off runs** | | |
 | `opencode` (`start`) | `oc` | (Re)create the container and attach a TUI |
 | `opencode:scaffold [path] <task>` | `ocsf` | Create a new project with opencode (task via stdin) |
 | `opencode:bg [path] <task>` | `ocbg` | Run a one-off opencode task (an opencode run in the service) on an existing project |
-| `opencode:changes [task]` | `occh` | Analyse the branch changes and propose a plan |
+| `opencode:changes [--output <path>]... [task]` | `occh` | Analyse the branch changes and propose a plan, optionally into a writable output (`--output`, workspace read-only), then run it with `opencode:bg` |
+| `opencode:io --output <path>... [task]` | `ocio` | Run a task against a read-only workspace with N writable outputs (`--output` file or directory, repeatable; `--allow-empty`) |
+| `opencode:repl` | `ocrepl` | Interactive bash shell bound to the workspace |
+|<hr>|<hr>|<hr>|
+| **Ensure running** | | |
 | `opencode:new` | `ocn` | Stop existing containers, then start a fresh session |
 | `opencode:up` | `ocu` | Start the container in the background, running nothing |
 | `opencode:setup <cmd>` | `ocset` | Start the container if needed, then run a command in it |
-| `opencode:uptree` | `ocut` | Start a container for an existing agent worktree |
+| `opencode:uptree` | `ocut` | Start a container for an existing agent worktree (`--branch <branch>` picks the worktree of a branch) |
+|<hr>|<hr>|<hr>|
+| **In the running container** | | |
 | `opencode:run <cmd>` | `ocr` | Run a task (docker task, docker run) in the service, one-off container if not running |
 | `opencode:exec <cmd>` | `oce` | Run a command interactively in the running container |
 | `opencode:shell` | `ocsh` | `exec sh` |
-| `opencode:repl` | `ocrepl` | Interactive bash shell bound to the workspace |
 | `opencode:compose <args>` | `occ` | Pass arguments straight through to `docker compose` |
+|<hr>|<hr>|<hr>|
+| **Stop & inspect** | | |
 | `opencode:stop` | `ocs` | Stop managed containers |
-| `opencode:delete` | `ocdel` | Force-remove managed containers (`--all` also drops images and networks) |
 | `opencode:down` | `ocd` | Remove this project's containers, networks and volumes |
+| `opencode:delete` | `ocdel` | Force-remove managed containers (`--all` also drops images and networks) |
 | `opencode:ls` (`list`) | `ocl` | List managed containers in a ps-style table |
+|<hr>|<hr>|<hr>|
+| **Host-side & meta** | | |
 | `opencode:git <args>` | `ocg` | Run git on the host, in the workspace |
-| `opencode:env` | `ocenv` | Print the launcher variables set in your environment (`SD_*`, `OPENCODE_*`) |
+| `opencode:env [ws\|workspace]` | `ocenv` | Print launcher variables, or the effective workspace path |
 | `opencode:create <action>` | `occre` | Create a workspace asset on the host (`--dockerfile`, `--worktree`) |
 | `opencode:update` | `ocud` | Refresh the launcher repo and its images |
 | `opencode:help [command]` | `och` | Show help, or help for one command |
 
-### Common options
+</details>
+
+<details>
+<summary>View command directory cli options</summary>
+### Common directory options
 
 Accepted by `stop`, `delete`, `ls` and `down` (each honours the subset that
 applies to it):
@@ -76,6 +97,11 @@ a worktree is the worktree's own path, plus the worktree's parent repository.
 `delete --all` scoped to a repository therefore covers the repository's worktrees
 as well, and `--other` preserves them with the repository.
 
+</details>
+
+<details>
+<summary>View create options</summary>
+
 ### Create options
 
 `opencode:create` (`occre`) creates a workspace asset on the host. Every action
@@ -86,8 +112,10 @@ running in the order given:
 | Option | Effect |
 |--------|--------|
 | `--dockerfile`, `--Dockerfile`, `-df` | Copy `Dockerfile.example` to `<workspace>/ocdocker/` and print the exports that build the workspace image from it |
-| `--worktree`, `--wt`, `-w` | Create the agent worktree `opencode:uptree` expects at `$SD_AGENT_TREE_ROOT/<project>-dev` |
-| `[branch]` (positional) | The branch to create for `--worktree` (default: `<project>-dev`, created from the current HEAD) |
+| `--worktree`, `--wt`, `-w` | Create an agent worktree `opencode:uptree` starts, at `$SD_AGENT_TREE_ROOT/<project>-dev` (or `$SD_AGENT_TREE_ROOT/<project>-<branch>` when a branch is given) |
+| `[branch]` (positional) | The branch to create for `--worktree` (default: `<project>-dev`, created from the current HEAD); it also names the worktree, so several agent worktrees of one project coexist (`dev` is reserved for the canonical one) |
+
+</details>
 
 ### Examples
 
@@ -109,6 +137,12 @@ opencode -c --auto
 opencode:changes "identify issues in these changes"
 opencode:bg ./ "refactor this module"
 
+# plan with the workspace read-only (only --output is writable), then run the
+# plan with bg; changes --output plans the branch changes the same way
+opencode:changes --output /tmp/plan.md
+opencode:io --output /tmp/out.md < /tmp/create-task-plan.md
+opencode:bg ./ < /tmp/out.md
+
 # new projects, either with a real path or under $SD_REPO_HOME
 opencode:scaffold /tmp/project < /tmp/sometask.md
 opencode:scaffold --path gists/project-1 "Create basic hello world html project"
@@ -129,23 +163,21 @@ OPENCODE_IMAGE_URL_TUI="devsnowdon/opencode-docker:empty-v2" opencode
 
 ## Install
 
-Clone the repository to `~/opencode`:
+Clone the repository to `~/opencode` (the launcher looks for its files there,
+and a `.env` in the repository root is read by plain `docker compose` runs):
 
 ```shell
 git clone https://github.com/snowdon-dev/opencode-docker.git ~/opencode
 ```
 
-`scripts/launcher.sh` looks for the compose files in `~/opencode`, so link the
-repository there. This also means a `.env` placed in the repository root is
-picked up by plain `docker compose` runs.
-
-Only one environment variable is required, `SD_OPENCODE`. The rest are for
-custom configuration or custom profiles: the path variables are read by compose
-([Compose variables](#compose-variables)), the launcher variables by the script
-itself ([Launcher variables](#launcher-variables)).
+Only `SD_OPENCODE` is required; the rest is optional: [Compose
+variables](#compose-variables) move toolchain cache paths, [Launcher
+variables](#launcher-variables) configure the launcher itself.
 
 ### oh-my-zsh plugin
 
+<details>
+<summary>View install via oh-my-zsh details</summary>
 The launcher sets up the required environment variables, such as `WORKSPACE`,
 so use it to launch the container. The `omz` plugin is very lightweight and not
 required — you are encouraged to create your own profiles and environments
@@ -170,109 +202,100 @@ plugins=(... opencode)
 After restarting your shell (`exec zsh`), list the commands with
 `alias | grep -E ^oc`. The plugin wraps the launcher in one alias per command
 (`oc`, `ocs`, `ocu`, `ocn`, `ocsh`, `ocset`, `ocr`, `ocd`, `ocdel`, `ocl`,
-`occ`, `occh`, `ocsf`, `ocbg`, `ocg`, `ocenv`, `ocut`, `och`, `ocud`, `ocrepl`,
-`occre`)
+`occ`, `occh`, `ocsf`, `ocbg`, `ocio`, `ocg`, `ocenv`, `ocut`, `och`, `ocud`,
+`ocrepl`, `occre`)
 — see [`omz/opencode.zsh`](omz/opencode.zsh) for the exact list.
+</details>
 
 ### Environment setup steps
 
 - `SD_OPENCODE` must point at the repository (default `$HOME/opencode`).
-- Docker is required [docker.io](https://www.docker.com/). For extra security
-    use docker rootless. `SD_DRIVER` selects the engine, but only `docker` is
-    implemented.
+- Docker is required ([docker.io](https://www.docker.com/)); rootless Docker
+    works for extra security.
 - A modern version of bash is required.
-- The opencode binary from the shell path runs the TUI (`npm i -g
-    opencode-ai`); without it the in-container `tui` service is used instead.
-- CPUs are unrestricted by default; restrict them with `OPENCODE_CPUSET`
-    (pinning) or `OPENCODE_CPUS` (limit).
-- If you want something to build on every workspace without its own
-  `OPENCODE_DOCKERFILE`, you can `cp "$SD_OPENCODE/Dockerfile.example"
-  "$SD_OPENCODE/Dockerfile`, and that Dockerfile will be built if there is no
-  `OPENCODE_DOCKERFILE` set.
+- The `opencode` binary on your shell path runs the TUI (`npm i -g
+    opencode-ai`); without it an in-container TUI is used instead.
+- CPUs are unrestricted by default; limit them with `OPENCODE_CPUSET`
+    (pinning) or `OPENCODE_CPUS` (count).
+- To apply a custom Dockerfile to every workspace without setting
+    `OPENCODE_DOCKERFILE`, copy `Dockerfile.example` to
+    `$SD_OPENCODE/Dockerfile`.
+- It is recommended to use the [API key file method](#api-key-secret) and
+  configure a provider in the project configuration template to read the key
+  from the file. See [Config, data and cache
+  directories](#config-data-and-cache-directories) below.
 
-### Creating the directories
+### config, data and cache directories
 
-The container runs as the `other` user (uid/gid `1000`), so every host
-directory bind-mounted under `/home/other/...` (see
-[`docker-compose.yml`](docker-compose.yml)) must exist and be writable by that
-user. Three of them are always mounted, so create and hand them over with
-default paths:
+opencode's config, data and cache live on the host under three roots —
+`OPENCODE_CONFIG_ROOT` (`~/.config/opencode-docker`), `OPENCODE_DATA_ROOT`
+(`~/.local/share/opencode-docker`) and `OPENCODE_CACHE_ROOT`
+(`~/.cache/opencode-docker`) — with a per-project directory created under each
+one automatically at launch. Each root must exist, be a directory and be
+writable; the launcher offers to create what is missing (`SD_YOLO=true` does
+it without asking). If your user is not uid/gid `1000`, `chown -R 1000:1000`
+the roots instead.
 
-```sh
-mkdir -p \
-    "$HOME/.cache/opencode/cache" \
-    "$HOME/.local/share/opencode" \
-    "$HOME/.config/opencode"
-chown -R 1000:1000 \
-    "$HOME/.cache/opencode" \
-    "$HOME/.local/share/opencode" \
-    "$HOME/.config/opencode"
+The first launch of a project copies `$OPENCODE_CONFIG_ROOT/template` into the
+project's config; later launches leave it alone, so your changes survive.
+Delete the project's config directory to re-seed it from the template.
+A simple root tempalte example could be
+(~/.config/opencode-docker/template/opencode.jsonc):
+```
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  // Default model for all sessions.
+  //"model": "opencode/big-pickle",
+  //"model": "opencode-go/gpt-5.6-luna",
+  //"model": "opencode-go/gpt-6-luna",
+  "model": "opencode-go/mimo-v2.6-flash",
+  "providers": {
+    "opencode-go": {
+      "settings": {
+        "apiKey": "{file:/var/run/secrets/api_key}"
+       }
+     }
+   },
+  "variant": "low",
+  "skills": [
+    "/opt/opencode/skills"
+  ]
+}
 ```
 
-The toolchain caches (`OPENCODE_PIP_CACHE_DIR`, `OPENCODE_NPM_CACHE_DIR`,
-`OPENCODE_GO_BUILD_CACHE_DIR`, `OPENCODE_GO_MOD_CACHE_DIR`,
-`OPENCODE_CARGO_REGISTRY_DIR`, `OPENCODE_CARGO_GIT_DIR`, `OPENCODE_SCCACHE_DIR`)
-are only mounted when you enable them with `OPENCODE_CACHE`, so create and
-chown them only if you do. Each one defaults to the conventional path under
-your home directory; see [Compose variables](#compose-variables). To find the
-exact volumes used, view the merged compose file with `opencode:comopse config`
-or `occ config`.
+Set `OPENCODE_CONFIG_DIR`, `OPENCODE_DATA_DIR` or `OPENCODE_CACHE_DIR` to use
+one exact directory instead of a root. They are launcher variables: export
+them in the shell, not in a `.env` file.
 
-Your project workspace also gets bind-mounted (at `/workspace`) and is written
-to by the container, so it too must be owned by `1000:1000`:
+Toolchain caches (`OPENCODE_PIP_CACHE_DIR`, `OPENCODE_NPM_CACHE_DIR`,
+`OPENCODE_GO_BUILD_CACHE_DIR`, `OPENCODE_GO_MOD_CACHE_DIR`,
+`OPENCODE_CARGO_REGISTRY_DIR`, `OPENCODE_CARGO_GIT_DIR`,
+`OPENCODE_SCCACHE_DIR`) are only mounted when enabled with `OPENCODE_CACHE`;
+see [Compose variables](#compose-variables). Create and chown them only if you
+enable them.
+
+The container also writes to your workspace, so if something fails on
+permissions make sure it is owned by the container user:
 
 ```sh
 chown -R 1000:1000 "$WORKSPACE"
 ```
 
-> If you override any path via `.env` (e.g. `OPENCODE_SCCACHE_DIR`), create
-> that directory instead and `chown -R 1000:1000` it. Do not run these commands
-> with `sudo` unless the directories live outside your home directory.
-
-## How a session starts
-
-`opencode` (the `start` command) starts an `opencode serve` backend inside the
-container, waits for it to become healthy, then starts a TUI — a host
-`opencode` binary when one is on the `PATH`, otherwise the one-off `tui`
-service. The backend is published on a host port only in the first case;
-otherwise it is reachable only on the compose network, so one project's backend
-cannot be reached from another project's host processes. It is killed when the
-TUI exits. The wait is a single `scripts/waitforserver.sh` process polling the
-backend's health endpoint (`/api/health` on v1, `/global/health` on v2) from the
-side that can reach it — on the host, or inside the container where only the
-service name resolves.
-
-`run`, `changes` and `setup` use the running container when there is one and a
-throwaway `compose run` container otherwise; `scaffold` and `bg` always use a
-throwaway container.
-
-## Security model
-
-- The workspaces's `.git` directories are mounted read-only, so it cannot
-  rewrite history; set `SD_READ_ONLY=false` to opt out.
-- A worktree's parent repository `.git` is mounted read-only at its host path,
-  which keeps git usable inside the container while isolating the workspace.
-- Each workspace gets its own Docker network, allocated a subnet from the
-  managed range, keeping workspaces isolated from each other.
-- Toolchain caches and other host mounts are opt-in (`OPENCODE_CACHE`).
-- A workspace outside `$HOME` prompts before it is used, unless `SD_YOLO=true`.
-
 ## Environment variables
 
 ### Compose variables
 
-All host-side paths are configured with environment variables. Substitution
-happens on the host when `docker compose` runs, and every variable has a
-default pointing at the conventional location under your home directory
-(`.cache`, `.local`, `.npm`, etc.).
+Toolchain cache and workspace host paths are configured with environment
+variables; every one has a default under your home directory.
+
+<details>
+<summary>View the compose variables</summary>
 
 | Variable                   | Default                          | Mounted at (container)              |
 |----------------------------|----------------------------------|-------------------------------------|
 | `WORKSPACE`                | `$SD_OPENCODE` (repo root)       | `/workspace`                        |
 | `OPENCODE_NETWORK`         | –                                | – (external network, see `compose/net/docker-compose.network.yml`) |
-| `OPENCODE_CACHE_DIR`       | `$HOME/.cache/opencode/cache`    | `/home/other/.cache/opencode/cache` |
-| `OPENCODE_DATA_DIR`        | `$HOME/.local/share/opencode`    | `/home/other/.local/share/opencode` |
-| `OPENCODE_CONFIG_DIR`      | `$HOME/.config/opencode`         | `/home/other/.config/opencode`      |
 | `OPENCODE_PIP_CACHE_DIR`   | `$HOME/.cache/pip`               | `/home/other/.cache/pip`            |
 | `OPENCODE_NPM_CACHE_DIR`   | `$HOME/.npm`                     | `/home/other/.npm`                  |
 | `OPENCODE_GO_BUILD_CACHE_DIR` | `$HOME/.cache/go-build`       | `/home/other/.cache/go-build`       |
@@ -284,10 +307,14 @@ default pointing at the conventional location under your home directory
 The container-side paths are fixed: they must match the user baked into the
 image (`other`, uid/gid 1000, see the `opencode/Dockerfile.*` variants).
 
+</details>
+
 ### Launcher variables
 
-These variables are read by `scripts/launcher.sh` from the shell environment
-(they are not compose path variables):
+These variables are read by the launcher from the shell environment:
+
+<details>
+<summary>View the launcher variables</summary>
 
 | Variable                   | Default                    | Effect                                              |
 |----------------------------|----------------------------|-----------------------------------------------------|
@@ -303,6 +330,12 @@ These variables are read by `scripts/launcher.sh` from the shell environment
 | `OPENCODE_COMPOSE`         | –                          | Space-separated extra `docker compose` files, merged into the project via `-f` |
 | `OPENCODE_WORKSPACE`       | –                          | The current opencode workspace context; launches targeting a directory outside it prompt before using its environment |
 | `OPENCODE_CACHE`           | –                          | Toolchain cache mounts to enable: `false` (default) none, `all` every cache, or space-separated ids (`go`, `node`, `python`, `rust`); any other id is rejected before the container is composed. Also selects the base image variant (`:empty-v1`, `:duck-v1`, `:full-v1`) unless `OPENCODE_IMAGE_URL` is set |
+| `OPENCODE_CONFIG_ROOT`     | `$HOME/.config/opencode-docker` | Root holding the `template/` config seeded once per project into `projects/<project>`, see [Config, data and cache directories](#config-data-and-cache-directories) |
+| `OPENCODE_DATA_ROOT`       | `$HOME/.local/share/opencode-docker` | Root of the per-project data directories, created under it at launch |
+| `OPENCODE_CACHE_ROOT`      | `$HOME/.cache/opencode-docker` | Root of the per-project cache directories, created under it at launch |
+| `OPENCODE_CONFIG_DIR`      | – (derived from the root)  | Exact directory mounted as the container's config; when set, `OPENCODE_CONFIG_ROOT` is not used |
+| `OPENCODE_DATA_DIR`        | – (derived from the root)  | Exact directory mounted as the container's data; when set, `OPENCODE_DATA_ROOT` is not used |
+| `OPENCODE_CACHE_DIR`       | – (derived from the root)  | Exact directory mounted as the container's cache; when set, `OPENCODE_CACHE_ROOT` is not used |
 | `OPENCODE_BACKEND_ORIGIN`  | `http://opencode:4096`, else resolved from `compose port` | Backend URL used for the TUI connection |
 | `OPENCODE_SERVER_PASSWORD` | –                          | Password for the backend's basic auth, passed to both the `opencode` and `tui` services. Unset leaves the backend open inside the compose network; the health endpoint the launcher probes stays reachable either way |
 | `OPENCODE_CPUSET`          | –                          | CPU pinning (e.g. `2-3`); unset by default (Docker uses all CPUs) |
@@ -312,79 +345,129 @@ These variables are read by `scripts/launcher.sh` from the shell environment
 | `SD_READ_ONLY`             | –                          | `false` (case-insensitive) skips the read-only `.git` override file |
 | `OPENCODE_NET_RANGE`       | `172.20.0.0/16`            | CIDR or bare prefix defining the managed IP range     |
 | `OPENCODE_NET_SUBNET`      | `29`                       | Subnet mask for each workspace network               |
+| `OPENCODE_KEY_FILE`       | `~/.config/opencode-docker/opencode.key` | Host file the api key is read from before every launch: a non-empty one merges `compose/secret/docker-compose.secret.yml`, which mounts the file into the container at `/run/secrets/api_key` |
 | `DOCKER_ARGS`              | –                          | – (extra args passed to all docker commands)         |
 | `COMPOSE_ARGS`             | –                          | – (extra args passed to every `docker compose` command) |
 
+</details>
+
+## How a session starts
+
+`opencode` (the `start` command) starts a backend inside the container, waits
+for it to become healthy, then attaches a TUI — your host `opencode` binary
+when one is on `PATH`, otherwise a one-off in-container `tui` service. The
+backend is stopped when the TUI exits.
+
+`run`, `changes` and `setup` use the running container when there is one, a
+throwaway container otherwise; `scaffold` and `bg` always use a throwaway one.
+`io` (and `changes --output`) always run on their own, with the workspace
+mounted read-only (see `opencode:help io`).
+
+## Security model
+
+- Workspace `.git` directories are mounted read-only, so history cannot be
+    rewritten and commands cannot be injected; `SD_READ_ONLY=false` opts out.
+- `opencode:io` and `opencode:changes --output` mount the whole workspace
+    read-only; only the declared `--output` paths are writable.
+- A worktree's parent repository `.git` is mounted read-only, keeping git
+    usable while the worktree stays isolated.
+- Each workspace gets its own Docker network, isolated from other workspaces.
+- Toolchain caches and other host mounts are opt-in (`OPENCODE_CACHE`).
+- The api key travels as a file, never an environment variable.
+- A workspace outside `$HOME` prompts before it is used, unless `SD_YOLO=true`.
+
+### API key secret
+
+Put your api key in `OPENCODE_KEY_FILE` (default
+`~/.config/opencode-docker/opencode.key`); a non-empty file is mounted into
+the container at `/run/secrets/api_key` and stays out of the container's
+environment, `docker inspect` and `docker compose config`. When the file is
+missing or empty the backend starts without a key. The container user must
+be able to read the file.
+
+opencode reads the key from that path only when your config says so: add the
+reference to the provider in the `opencode.json` of your config template
+(`$OPENCODE_CONFIG_ROOT/template`, see [config, data and cache
+directories](#config-data-and-cache-directories)). On the v2 images it goes
+into `providers.<id>.settings.apiKey`:
+
+```json
+{
+    "providers": {
+        "opencode-go": {
+            "settings": {
+                "apiKey": "{file:/run/secrets/api_key}"
+            }
+        }
+    }
+}
+```
+
+On the v1 images the same `{file:/run/secrets/api_key}` reference goes into
+`provider.<id>.options.apiKey` instead.
+
 ### Network isolation
 
-The launcher supports three network modes controlled by `OPENCODE_NETWORK`:
+`OPENCODE_NETWORK` picks one of three modes:
 
-1. **Unset (default)** — no external network is attached; the container uses
-    Docker's default bridge network.
-2. **`@default` (recommended)** — the launcher automatically creates a
-    workspace-scoped bridge network named `sd-<project>-default` and attaches
-    it to both the `opencode` and `tui` services, with a subnet allocated from
-    `OPENCODE_NET_RANGE`. The network is reused across restarts: the launcher
-    looks for an existing network labelled with the workspace before creating
-    one. Cleanup happens via `opencode:delete --all` or `docker network rm`.
-3. **Named network** — pass any existing Docker network name to attach both
-    services to it, sharing a network between workspaces or external services.
+1. **Unset (default)** — Docker's default bridge network.
+2. **`@default` (recommended)** — a bridge network created for this workspace
+    on first use and reused across restarts; clean up with `opencode:delete
+    --all`.
+3. **Named network** — any existing Docker network, shared between workspaces
+    or external services.
 
 ```sh
 OPENCODE_NETWORK=@default opencode
 OPENCODE_NETWORK="my-shared-net" opencode
 ```
 
-#### Subnet allocation
-
-The range is sliced by `OPENCODE_NET_SUBNET`. A subnet mask smaller than the
-range mask is rejected, since it would overlap the other slices; a `/16` range
-sliced with the default `/29` gives 8192 subnets (6 usable hosts each), and
-with `/24` gives 256 subnets (254 usable hosts each). When every slice is taken
-the launcher exits with an error.
+Each workspace network gets its own subnet, carved from `OPENCODE_NET_RANGE`
+(default `172.20.0.0/16`) at `OPENCODE_NET_SUBNET` (default `/29`).
 
 ### Setting variables
 
-Launcher variables are read from the environment and should not be set in a
-`.env` file. Compose variables are resolved in this order:
+Launcher variables are read from the shell environment, not from a `.env`
+file. Compose variables resolve in this order: shell environment, a `.env`
+file next to the compose files (`~/opencode/.env`), then the defaults in
+`docker-compose.yml`.
 
-1. Shell environment (`export OPENCODE_CACHE_DIR=/big/disk/cache`)
-2. A `.env` file next to your compose files (by default `~/opencode/.env`,
-    which is the project directory `docker compose` reads from)
-3. The inline defaults in `docker-compose.yml`
-
-To see what the launcher will actually read, print the relevant variables with
-`opencode:env` (`ocenv`), which lists every exported `SD_*` and `OPENCODE_*`
-variable. It resolves no workspace and starts nothing, so it is useful for
-checking a shell profile or an `oh-my-zsh` setup before launching a container:
+`opencode:env` (`ocenv`) prints the exported `SD_*` and `OPENCODE_*`
+variables the launcher sees — useful for checking a shell profile before
+launching anything. Only exported variables appear:
 
 ```sh
 opencode:env | grep '^SD_'
 opencode:env | grep '^OPENCODE_CACHE'
 ```
 
-Only what is exported is shown: a variable set without `export`, or one that
-lives solely in a `.env` file (the launcher does not read those), does not
-appear.
+`opencode:env ws` prints the effective workspace path.
 
 #### Env file example
 
-Add a file like the following to `~/opencode/.env` (only the paths you want to
-move; every other path variable keeps its default).
+Add a file like the following to `~/opencode/.env` (only the toolchain cache
+paths you want to move; every other path variable keeps its default):
 
 ```sh
-OPENCODE_CACHE_DIR=/mnt/usb2/storage/opencode/cache/opencode/opencode/cache
-OPENCODE_DATA_DIR=/opt/opencode-data/home/other/.local/share/opencode
+OPENCODE_PIP_CACHE_DIR=/mnt/usb2/storage/opencode/cache/pip
 OPENCODE_SCCACHE_DIR=/mnt/usb2/storage/opencode/cache/rust/sccache
+```
+
+The launcher-managed roots are launcher variables and belong in the shell
+environment instead — a `.env` file never reaches the launcher:
+
+```sh
+export OPENCODE_CONFIG_ROOT=/mnt/usb2/storage/opencode/config
+export OPENCODE_DATA_ROOT=/mnt/usb2/storage/opencode/data
+export OPENCODE_CACHE_ROOT=/mnt/usb2/storage/opencode/cache
 ```
 
 ## Worktrees
 
-A git worktree is a first-class workspace. Its `.git` is a file pointing into
-the parent repository, so the launcher records the parent and mounts its `.git`
-read-only (see [Security model](#security-model)): git stays usable inside the
-container while the worktree itself stays isolated. Add one and work in it from
-the parent repository:
+A git worktree is a first-class workspace: its `.git` is a file pointing into
+the parent repository, which the launcher mounts read-only (see [Security
+model](#security-model)) so git stays usable inside the container while the
+worktree stays isolated. Add one and work in it from the parent repository:
 
 ```sh
 cd ~/repos/myproject
@@ -393,58 +476,49 @@ opencode:up "$(realpath ../myproject-wt)"
 opencode:git status   # runs in the worktree
 ```
 
-Conversely, when run from a parent repository that has exactly one worktree
-child, commands resolve to that child, so `opencode:up` from the parent starts
-the worktree's container. More than one child is an error.
+From a parent repository whose worktree child exists, commands resolve to that
+child. When several worktrees could be meant, the launcher lists them and
+stops — run the command from the worktree you mean, or pass its path
+explicitly:
+
+```sh
+opencode "$PWD/w1"
+opencode "$PWD/w2"
+```
 
 ### Worktree sync
 
 Commands that hand work to the agent (`opencode`, `run`, `scaffold`, `bg`)
-assert the worktree is in sync with the parent branch first: when the parent is
-ahead and the worktree is clean it is fast-forwarded to match, otherwise the
-launcher reports the divergence and exits. The remaining commands (`up`,
-`setup`, `exec`, `shell`, `compose`, `changes`, `new`, `down`, `uptree`,
-`repl`) skip this check.
+sync the worktree with its parent branch first: a clean worktree whose parent
+is ahead is fast-forwarded, otherwise the launcher reports the divergence and
+stops. Every other command skips the check.
 
 ### Agent worktrees (uptree)
 
 `opencode:uptree` starts a container for an agent worktree living under
-`SD_AGENT_TREE_ROOT` (default `$SD_REPO_HOME/agent-trees`, which must exist),
-named after the project with a `-dev` suffix. `opencode:create --worktree`
-creates exactly that worktree, so the two commands pair up:
+`SD_AGENT_TREE_ROOT` (default `$SD_REPO_HOME/agent-trees`; create it once
+yourself). `opencode:create --worktree` creates them, one per branch, so a
+project can hold several agent worktrees side by side:
 
 ```sh
 mkdir -p "$SD_AGENT_TREE_ROOT"          # once, it is not created for you
 
 cd ~/repos/myproject
-opencode:create --worktree              # git worktree add -B myproject-dev
-opencode:uptree "$PWD"                  # start the container for it
+opencode:create --worktree              # the canonical <project>-dev worktree
+opencode:uptree "$PWD"                  # start its container
 
-# or a branch of your own choosing, then start it
+# or a branch of your own choosing, then start that worktree
 opencode:create --worktree feature/my-branch
-opencode:uptree "$PWD"
+opencode:uptree --branch feature/my-branch "$PWD"
 ```
 
-`--worktree` runs `git worktree add -B <branch>` in the workspace, the same
-command `uptree` prints when the worktree is missing, so the worktree starts
-from the current HEAD of the parent repository; it also prints the
-`opencode:uptree` line to run next. Re-running it is safe: an existing worktree
-of the repository is reported, with its branch, and left alone — nothing is
-reset — so remove it with `git worktree remove` first if you want it recreated
-on another branch. A directory at that path that is not a worktree of the
-repository, or a workspace that is not a git repository at all, is an error.
-
-`opencode:uptree` does not create the worktree itself: when it is missing, the
-command prints the `git worktree add` line to run, which
-`opencode:create --worktree` does for you. Doing it by hand works the same:
-
-```sh
-git worktree add -B some-branch "$SD_REPO_HOME/agent-trees/myproject-dev"
-opencode:uptree ~/repos/myproject
-```
-
-Either way the worktree becomes a workspace of its own, with its own container
-named after the `<project>-dev` project.
+Each worktree is its own workspace with its own container, named after the
+project and branch; `<project>-dev` is the canonical one and the name `dev` is
+reserved for it, so a branch sanitising to `dev` (`DEV`, `dev.`) is refused.
+Creating is safe to re-run: an existing worktree is reported and left alone —
+`git worktree remove` it first if you want it recreated on another branch.
+`uptree` never creates the worktree itself; when it is missing it prints the
+`git worktree add` line to run.
 
 ## Start extending with custom functions
 
@@ -497,93 +571,24 @@ Please share your extensions in the discussions section.
 ## Build
 
 The base image [devsnowdon/opencode-docker](https://hub.docker.com/r/devsnowdon/opencode-docker)
-is prebuilt, and the workspace image is `FROM` it — extend the base with
-`/Dockerfile`, or see the base image in `/opencode/Dockerfile.*`.
+is prebuilt: variants `empty` (minimal CLI toolset), `duck` (adds Node.js and
+Python) and `full` (adds Go, C and Rust), each published for v1 and v2. Your
+workspace image builds on top of it — extend the base with `/Dockerfile`, or
+pick a variant with `OPENCODE_IMAGE_URL`.
 
-### Base Dockerfile
-
-The base image is **layered**: three toolchain bases (each a thin `FROM` of the
-previous one, so the registry shares the common layers) plus one thin layer per
-opencode version, giving six published images.
-
-```mermaid
-flowchart TB
-    subgraph bases["Toolchain bases - built once, shared by every version"]
-        direction TB
-        EB["empty-base<br/>git, curl, make, bash, ripgrep, neovim, user other"]
-        DB["duck-base<br/>plus node, npm, python, pip"]
-        FB["full-base<br/>plus go and go tools, c toolchain, rust"]
-        EB --> DB --> FB
-    end
-    subgraph layers["Version layers - the CLI and the helper scripts"]
-        V1["Dockerfile.v1"]
-        V2["Dockerfile.v2"]
-    end
-    EB -- "BASE_TAG=empty-base" --> V1
-    DB -- "BASE_TAG=duck-base" --> V1
-    FB -- "BASE_TAG=full-base" --> V1
-    EB -- "BASE_TAG=empty-base" --> V2
-    DB -- "BASE_TAG=duck-base" --> V2
-    FB -- "BASE_TAG=full-base" --> V2
-    V1 --> V1I["empty-v1, duck-v1, full-v1"]
-    V2 --> V2I["empty-v2, duck-v2, full-v2 plus the :latest alias"]
-```
-
-| Variant | Base contents | Base tag | Published tags |
-|---------|---------------|----------|----------------|
-| `empty` | Minimal CLI toolset (`git`, `curl`, `make`, `bash`, `ripgrep`, `neovim`, user `other`) | `:empty-base` | `:empty-v1`, `:empty-v2` |
-| `duck`  | `empty` + Node.js, npm, Python, pip | `:duck-base` | `:duck-v1`, `:duck-v2` |
-| `full`  | `duck` + Go + Go tools (`gopls`, `dlv`, `swag`, `golangci-lint`), C toolchain, Rust (opt-in via `INSTALL_RUST`) | `:full-base` | `:full-v1`, `:full-v2` (also `:latest`) |
-
-#### Local builds (Makefile)
-
-Build the layered images locally with the latest opencode version. Bases must be
-built first, each `FROM`ing the one below it, and only then can the version
-layers be applied to them:
-
-```sh
-make build            # 3 bases + 6 images (native, with the :latest alias)
-make build-arch       # same, single arch, loaded (ARCH=amd64|arm64)
-make build-amd64      # convenience: make build-arch ARCH=amd64
-make build-arm64      # convenience: make build-arch ARCH=arm64
-make build-multi      # same, multi-arch manifests, pushed
-make pipeline         # native build + push all six images to the registry
-make builder          # create the docker-container buildx builder (once)
-make build-bases      # only the 3 toolchain bases
-make build-base-duck  # only one base, e.g. build-base-empty/-duck/-full
-make build-versions   # only the 6 <variant>-<version> images
-make build-empty-v1   # only one image, e.g. build-empty-v1/-duck-v2/-full-v2
-make build-arch-versions  # ... for a single arch
-make build-multi-versions # ... pushed as multi-arch manifests
-```
-
-The version layers are driven by `VARIANTS` (`empty duck full`), `VERSIONS`
-(`v1 v2`) and `LATEST` (`full-v2`, which also gets the `:latest` tag) in the
-Makefile — add a version there plus an `opencode/Dockerfile.vN` and every target,
-including the per-image `build-<variant>-<version>` ones, picks it up. A
-single-image target builds its own base first, since the version layer `FROM`s
-it. `make build` passes `--build-arg INSTALL_RUST=true` — set `RUST=false`
-(`make build RUST=false`) to skip the Rust toolchain in the full base. The
-image tag defaults to `registry.lan:5000/snowdon-dev/opencode`; override it
-with `REGISTRY` (e.g. `make build REGISTRY=my.dev/opencode`). Multi-arch
-manifest pushes need the container-driver builder (`make builder`); the `-base`
-tags are pushed too, since the version layers and the child bases `FROM` them.
+Images can also be built locally from the Makefile: `make build` for
+everything, or the per-variant and per-architecture targets listed there.
 
 ## Testing
 
-The launcher has a unit-test suite that runs it against **mocked** binaries
-(`tests/mockbin/`) — `docker`, `curl` and `opencode` — so no Docker daemon is
-required. The mock `docker` records the exact `docker ...` command each
-subcommand would run, and the tests assert those commands.
+The launcher's test suite runs against mocked `docker`, `curl` and `opencode`
+binaries, so no Docker daemon is needed:
 
 ```sh
-make test                 # run the whole suite
-./tests/run_tests.sh up   # run a single test by name (down, stop, exec, run, create, ...)
+make test                  # run the whole suite
+bats --filter up tests/    # run one test by name (up, stop, create, ...)
+bats -t tests/control.bats # one suite, TAP output on stdout
 ```
-
-Each test builds a throwaway sandbox under `/tmp` and removes it afterwards;
-`tests/run_tests.sh` documents the runner in more detail, including how to run
-the launcher by hand with the mock on your `PATH`.
 
 ## Contributing
 
@@ -598,3 +603,4 @@ Public License v3.0](LICENSE) or later.
 
 Any redistributed modified version must be released under GPL-3.0 with its
 full source code — if you share changes, send them back upstream so everyone
+can benefit.
