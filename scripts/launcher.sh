@@ -972,11 +972,12 @@ function _ws_resource_ls() {
 }
 
 # Write a Compose override mounting each entry of the array named by $1
-# ("source:/container/path" pairs) read-only onto the opencode service. The
-# tmp paths are set so the EXIT trap's _cleanup removes the override.
+# ("source:/container/path" pairs) read-only onto the opencode service: the
+# read-only .git dirs and the component skill (see _opencode_args_prepare).
+# The tmp paths are set so the EXIT trap's _cleanup removes the override.
 function _write_volume_overrides() {
     local -n mounts="$1"
-    tmp_compose_file="$tmp_compose_dir/docker-compose.git.yml"
+    tmp_compose_file="$tmp_compose_dir/compose.rovols.yaml"
     {
         printf '%s\n' 'services:'
         printf '%s\n' '  opencode:'
@@ -1833,8 +1834,8 @@ function _opencode_args_prepare() {
         done
     fi
 
-    # .git dirs mount read-only by default; SD_READ_ONLY=false opts out and
-    # mounts the workspace without the git override file.
+    # .git dirs mount read-only by default; SD_READ_ONLY=false opts out: no
+    # .git dir is mounted, and none enters the volume override.
     if [[ "${SD_READ_ONLY,,}" != "false" ]]; then
         local git_dir
         while IFS= read -r -d '' git_dir; do
@@ -1853,7 +1854,7 @@ function _opencode_args_prepare() {
         fi
     fi
 
-    # mount the read-only git overrides, when there are any
+    # mount the read-only volume overrides, when there are any
     if ((${#ro_vol_mounts[@]} > 0)); then
         _write_volume_overrides ro_vol_mounts
         args_out+=(-f "$tmp_compose_file")

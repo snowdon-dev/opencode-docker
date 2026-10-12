@@ -32,7 +32,7 @@
   override merge order built in `make_sandbox`. Changing compose override
   merging, labels, or launcher flags almost always means updating those
   expectations (temp paths are normalised by the helpers:
-  `<tmp>/docker-compose.git.yml`, `oc-*-<pid>`).
+  `<tmp>/compose.rovols.yaml`, `oc-*-<pid>`).
 - The launcher always runs under `setsid` with `SD_YOLO=true` so `/dev/tty`
   prompts take their default-abort path.
 
@@ -80,10 +80,12 @@ so they do not count as clutter) or here.
   (first launch only); later launches neither wipe nor re-copy it. Delete the
   project directory to re-seed.
 - The image component's skill (`opencode/skills/available-<variant>-tools/SKILL.md`)
-  is copied into the project config's `skills/` on every launch, replacing a
-  stale skill of another component: the config dir is the one place every
-  service and the host TUI read, and opencode only discovers
-  `skills/<name>/SKILL.md` directories.
+  is bind-mounted read-only into the container at `/opt/opencode/skills` on
+  every launch, through the read-only volume override (`compose.rovols.yaml`,
+  the same override file that carries the read-only `.git` mounts);
+  `opencode.json` points its `skills` list at that directory. The project
+  config's own `skills/` is never written after seeding, and
+  `SD_READ_ONLY=false` drops only the `.git` mounts, never the skill.
 - `OPENCODE_{CONFIG,DATA,CACHE}_DIR` bypass the root entirely (no per-project
   subdir, no template). They are launcher variables: in a `.env` file compose
   would mount a directory the launcher never checked or created.

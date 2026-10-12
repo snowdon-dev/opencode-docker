@@ -398,7 +398,7 @@ docker network rm net-other"
     # A worktree resolves straight to itself (its parent is known from the .git
     # pointer), so there is no worktree-child probe: only the list afterwards
     # queries the parent label.
-    assert_docker "docker compose -p wt -f $SD/compose/docker-compose.yml -f <tmp>/docker-compose.labels.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CIMG -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.port.yml up -d opencode [env WORKSPACE_PARENT=$SD/ws]
+    assert_docker "docker compose -p wt -f $SD/compose/docker-compose.yml -f <tmp>/docker-compose.labels.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CIMG -f <tmp>/compose.rovols.yaml -f $SD/compose/compose/sys/docker-compose.port.yml up -d opencode [env WORKSPACE_PARENT=$SD/ws]
 $CPS --filter label=dev.snowdon.opencode.workspace=$SD/wt
 $CINFO
 $CPS --filter label=dev.snowdon.opencode.parent=$SD/wt

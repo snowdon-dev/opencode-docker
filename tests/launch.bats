@@ -106,7 +106,7 @@ load 'lib/helpers'
     run_launcher_no_host_opencode /dev/null start --model gpt
 
     # The compose args must NOT include the port override.
-    local cbase_no_port="docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CIMG -f <tmp>/docker-compose.git.yml"
+    local cbase_no_port="docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CIMG -f <tmp>/compose.rovols.yaml"
     assert_docker_contains "$cbase_no_port up -d opencode"
     assert_docker_contains "$cbase_no_port exec -T opencode curl -fsS --connect-timeout 0.2 --max-time 0.5 http://127.0.0.1:4096"
     assert_docker_contains "$cbase_no_port run --rm --remove-orphans -e BACKEND_ORIGIN=http://opencode:4096 tui --model gpt"
@@ -122,7 +122,7 @@ load 'lib/helpers'
     # path; the mocked `waitforserver` then succeeds. The TUI is then run as the
     # one-off `tui` service, whose entrypoint is the container-side start-tui.
     OPENCODE_TEST_HEALTH_FAIL=1 run_launcher_no_host_opencode /dev/null start --model gpt
-    local cbase_no_port="docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CIMG -f <tmp>/docker-compose.git.yml"
+    local cbase_no_port="docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CIMG -f <tmp>/compose.rovols.yaml"
     assert_docker_contains "$cbase_no_port exec -d -w /workspace/project opencode start-serve-backend"
     assert_docker_contains "$cbase_no_port exec -T -w /workspace/project opencode waitforserver http://127.0.0.1:4096"
     assert_docker_contains "$cbase_no_port run --rm --remove-orphans -e BACKEND_ORIGIN=http://opencode:4096 tui --model gpt"

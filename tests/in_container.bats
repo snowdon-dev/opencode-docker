@@ -47,19 +47,21 @@ $CBASE config --services"
 }
 
 @test "compose_no_readonly" {
-    # SD_READ_ONLY=false disables the read-only .git mounts. With them gone
-    # the launcher has no read-only volume overrides left to write, so the
-    # docker-compose.git.yml override file is not merged at all. What proves
-    # .git locking in the default case is the launcher's "read-only locking
-    # dir:" line, printed once per .git dir it locks.
+    # SD_READ_ONLY=false disables the read-only .git mounts: none is printed
+    # ("read-only locking dir:", once per .git dir it locks) and none enters
+    # the read-only volume override - which is still merged, because the
+    # component skill is always mounted through it. What proves the .git
+    # locking in the default case is that printed line.
     # run_launcher sources the dotfile in the parent shell, so unset it again to
     # avoid leaking into later tests.
     local dotfile="$SD/readonly.env"
     echo 'SD_READ_ONLY=false' >"$dotfile"
     run_launcher "$dotfile" compose config --services
     assert_docker "$CPARENTPS
-docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CIMG -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
+docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CIMG -f <tmp>/compose.rovols.yaml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
     assert_launcher_output_contains "Running Docker Compose for project: ws"
     assert_launcher_output_lacks "read-only locking dir:"
+    assert_override_contains "/opt/opencode/skills/available-duck-tools:ro"
+    assert_override_lacks ".git:"
     unset SD_READ_ONLY
 }

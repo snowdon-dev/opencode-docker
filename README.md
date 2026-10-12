@@ -239,7 +239,8 @@ the roots instead.
 The first launch of a project copies `$OPENCODE_CONFIG_ROOT/template` into the
 project's config; later launches leave it alone, so your changes survive.
 Delete the project's config directory to re-seed it from the template.
-A simple root tempalte example could be
+
+A simple root template for opencode v2 could could be 
 (~/.config/opencode-docker/template/opencode.jsonc):
 ```
 {
@@ -342,7 +343,7 @@ These variables are read by the launcher from the shell environment:
 | `OPENCODE_CPUS`            | –                          | CPU limit (e.g. `2`); unset by default (no quota)    |
 | `SD_YOLO`                  | –                          | `true` (case-insensitive) skips the outside-`HOME` workspace check |
 | `SD_YOLO_HOME`             | –                          | `true` validates workspaces against `SD_REPO_HOME` instead of `$HOME` |
-| `SD_READ_ONLY`             | –                          | `false` (case-insensitive) skips the read-only `.git` override file |
+| `SD_READ_ONLY`             | –                          | `false` (case-insensitive) skips the read-only `.git` mounts |
 | `OPENCODE_NET_RANGE`       | `172.20.0.0/16`            | CIDR or bare prefix defining the managed IP range     |
 | `OPENCODE_NET_SUBNET`      | `29`                       | Subnet mask for each workspace network               |
 | `OPENCODE_KEY_FILE`       | `~/.config/opencode-docker/opencode.key` | Host file the api key is read from before every launch: a non-empty one merges `compose/secret/docker-compose.secret.yml`, which mounts the file into the container at `/run/secrets/api_key` |

@@ -106,9 +106,10 @@ make_sandbox() {
     # launcher run never stops to offer creating them (see _cache_dirs).
     _cache_dirs
     # Compose base args used in every expected command, in the order
-    # _opencode_args_prepare merges them: main file, [cache], image, git mount,
-    # port. The git mount lives in a mktemp dir and is normalised to <tmp>.
-    CBASE="docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CIMG -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.port.yml"
+    # _opencode_args_prepare merges them: main file, [cache], image, read-only
+    # volume mounts, port. The volume override lives in a mktemp dir and is
+    # normalised to <tmp>.
+    CBASE="docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CIMG -f <tmp>/compose.rovols.yaml -f $SD/compose/compose/sys/docker-compose.port.yml"
     # Container discovery: the managed label first, then -a, then the scoping
     # label. Shared by every expectation so the flag order is defined once.
     CPS="docker ps -q --filter label=dev.snowdon.opencode.managed=true -a"
@@ -160,7 +161,7 @@ teardown() {
 # --- launcher runners ---------------------------------------------------
 
 # Run the launcher, capturing both the launcher's stdout/err and the mock
-# docker log. Nondeterministic temp paths (docker-compose.git.yml) are
+# docker log. Nondeterministic temp paths (compose.rovols.yaml) are
 # normalised so assertions are stable.
 #   run_launcher <path-to-env-dotfile> <subcommand> [args...]
 # The directory the launcher is driven from is $LAUNCH_CWD (default the sandbox
@@ -193,6 +194,12 @@ run_launcher() {
     # expectations below. The secret tests override it through their dotfile.
     export OPENCODE_KEY_FILE="$SD/no-opencode.key"
     : >"$OPENCODE_TEST_DOCKER_LOG"
+    # The compose files handed to docker are captured per invocation, too: the
+    # launcher's generated overrides live in a mktemp dir it removes on exit,
+    # so this is the only place a test can inspect them
+    # (assert_override_contains / assert_override_lacks).
+    export OPENCODE_TEST_OVERRIDE_LOG="$SD/override.log"
+    : >"$OPENCODE_TEST_OVERRIDE_LOG"
 
     # Optional env overrides
     if [[ -f "$dotfile" ]]; then
@@ -224,10 +231,11 @@ run_launcher() {
     LAUNCH_OUT="$(printf '%s\n' "$out" | grep -v '^mocked:' || true)"
 
     # Normalise the docker log: collapse the nondeterministic temp files the
-    # launcher generates per run (the git mount, the worktree label override,
-    # the io mount override) and the scaffold/bg/io container pids.
+    # launcher generates per run (the read-only volume override, the worktree
+    # label override, the io mount override) and the scaffold/bg/io container
+    # pids.
     DOCKER_LOG="$(sed -E \
-        -e 's#-f [^ ]*docker-compose\.git\.yml#-f <tmp>/docker-compose.git.yml#g' \
+        -e 's#-f [^ ]*compose\.rovols\.yaml#-f <tmp>/compose.rovols.yaml#g' \
         -e 's#-f [^ ]*docker-compose\.labels\.yml#-f <tmp>/docker-compose.labels.yml#g' \
         -e 's#-f [^ ]*docker-compose\.io\.yml#-f <tmp>/docker-compose.io.yml#g' \
         -e 's/oc-scaffold-[0-9]+/oc-scaffold-<pid>/g' \
@@ -267,6 +275,12 @@ run_launcher_no_host_opencode() {
     # a test points OPENCODE_KEY_FILE at one.
     export OPENCODE_KEY_FILE="$SD/no-opencode.key"
     : >"$OPENCODE_TEST_DOCKER_LOG"
+    # The compose files handed to docker are captured per invocation, too: the
+    # launcher's generated overrides live in a mktemp dir it removes on exit,
+    # so this is the only place a test can inspect them
+    # (assert_override_contains / assert_override_lacks).
+    export OPENCODE_TEST_OVERRIDE_LOG="$SD/override.log"
+    : >"$OPENCODE_TEST_OVERRIDE_LOG"
 
     if [[ -f "$dotfile" ]]; then
         set -a
@@ -301,7 +315,7 @@ run_launcher_no_host_opencode() {
 
     LAUNCH_OUT="$(printf '%s\n' "$out" | grep -v '^mocked:' || true)"
     DOCKER_LOG="$(sed -E \
-        -e 's#-f [^ ]*docker-compose\.git\.yml#-f <tmp>/docker-compose.git.yml#g' \
+        -e 's#-f [^ ]*compose\.rovols\.yaml#-f <tmp>/compose.rovols.yaml#g' \
         -e 's#-f [^ ]*docker-compose\.labels\.yml#-f <tmp>/docker-compose.labels.yml#g' \
         -e 's#-f [^ ]*docker-compose\.io\.yml#-f <tmp>/docker-compose.io.yml#g' \
         -e 's/oc-scaffold-[0-9]+/oc-scaffold-<pid>/g' \
@@ -350,6 +364,47 @@ assert_docker_lacks() {
         echo "--- docker log ---"
         printf '%s\n' "$DOCKER_LOG" | sed 's/^/    /'
         return 1
+    fi
+    return 0
+}
+
+# Assert that the compose files docker was handed contain / lack the given
+# line. The mock records their contents at invocation (the launcher deletes
+# its generated overrides on exit), so this is how a test inspects what an
+# override actually merges - a mount, a label - rather than only the -f flag.
+#   assert_override_contains <needle>
+#   assert_override_lacks <needle>
+assert_override_contains() {
+    local needle="$1"
+    if [[ -f "${OPENCODE_TEST_OVERRIDE_LOG:-}" ]] &&
+        grep -Fq -- "$needle" "$OPENCODE_TEST_OVERRIDE_LOG"; then
+        return 0
+    fi
+    echo "FAIL: compose file contents do not contain: $needle"
+    _print_override_log
+    return 1
+}
+
+assert_override_lacks() {
+    local needle="$1"
+    if [[ -f "${OPENCODE_TEST_OVERRIDE_LOG:-}" ]] &&
+        grep -Fq -- "$needle" "$OPENCODE_TEST_OVERRIDE_LOG"; then
+        echo "FAIL: compose file contents unexpectedly contain: $needle"
+        _print_override_log
+        return 1
+    fi
+    return 0
+}
+
+# Diagnostics for the override assertions: the recorded compose file contents,
+# indented, or a note when nothing was recorded (a launcher run that never
+# reached a compose command, e.g. an early abort).
+_print_override_log() {
+    echo "--- compose file contents ---"
+    if [[ -f "${OPENCODE_TEST_OVERRIDE_LOG:-}" ]]; then
+        sed 's/^/    /' "$OPENCODE_TEST_OVERRIDE_LOG"
+    else
+        echo "    (none recorded)"
     fi
     return 0
 }

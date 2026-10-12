@@ -72,6 +72,25 @@ else
     mock_log "docker $*"
 fi
 
+# Record the contents of every compose file the invocation passes with -f when
+# a test asks for it (OPENCODE_TEST_OVERRIDE_LOG). The launcher writes its
+# generated overrides into a mktemp directory it removes on exit, so this is
+# the only point where a test can see what an override actually merges (see
+# assert_override_contains in tests/lib/helpers.bash). Each file's lines are
+# appended verbatim under a "=== <path>" header.
+if [[ -n "${OPENCODE_TEST_OVERRIDE_LOG:-}" ]]; then
+    _mock_prev=""
+    for _mock_arg in "$@"; do
+        if [[ "$_mock_prev" == "-f" && -f "$_mock_arg" ]]; then
+            {
+                printf '=== %s\n' "$_mock_arg"
+                cat "$_mock_arg"
+            } >>"$OPENCODE_TEST_OVERRIDE_LOG"
+        fi
+        _mock_prev="$_mock_arg"
+    done
+fi
+
 # The invocation as given, kept before the parsing below consumes it: the io
 # write-back keys off the container name, which the flag-skipping loops eat.
 MOCK_RAW_ARGS="$*"

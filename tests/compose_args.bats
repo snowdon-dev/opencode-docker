@@ -56,7 +56,7 @@ load 'lib/helpers'
     echo 'OPENCODE_CACHE=all' >"$dotfile"
     run_launcher "$dotfile" compose config --services
     assert_docker "$CPARENTPS
-docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CACHEVOL/docker-compose.cache.yml -f $CIMG -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
+docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CACHEVOL/docker-compose.cache.yml -f $CIMG -f <tmp>/compose.rovols.yaml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
     unset OPENCODE_CACHE
 }
 
@@ -90,7 +90,7 @@ docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/en
     export HOME
     unset OPENCODE_CACHE OPENCODE_CONFIG_ROOT OPENCODE_DATA_ROOT OPENCODE_CACHE_ROOT
     assert_docker "$CPARENTPS
-docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CACHEVOL/docker-compose.cache.yml -f $CIMG -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
+docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CACHEVOL/docker-compose.cache.yml -f $CIMG -f <tmp>/compose.rovols.yaml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
     # The missing roots are named, not silently skipped...
     assert_launcher_output_contains "The following directories do not exist:"
     assert_launcher_output_contains "$bare_home/.local/share/opencode-docker"
@@ -179,7 +179,7 @@ docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/en
     echo 'OPENCODE_CACHE="PYTHON NODE"' >"$dotfile"
     run_launcher "$dotfile" compose config --services
     assert_docker "$CPARENTPS
-docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CACHEVOL/docker-compose.python.yml -f $CACHEVOL/docker-compose.node.yml -f $CIMG -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
+docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CACHEVOL/docker-compose.python.yml -f $CACHEVOL/docker-compose.node.yml -f $CIMG -f <tmp>/compose.rovols.yaml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
     unset OPENCODE_CACHE
 }
 
@@ -247,7 +247,7 @@ $CBASE config --services"
     echo 'OPENCODE_CPUSET=2-3' >"$dotfile"
     run_launcher "$dotfile" compose config --services
     assert_docker "$CPARENTPS
-docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CIMG -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.cpuset.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
+docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CIMG -f <tmp>/compose.rovols.yaml -f $SD/compose/compose/sys/docker-compose.cpuset.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
     assert_launcher_output_contains "Using CPUSET: 2-3"
     unset OPENCODE_CPUSET
 }
@@ -259,7 +259,7 @@ docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/en
     echo 'OPENCODE_CPUS=2' >"$dotfile"
     run_launcher "$dotfile" compose config --services
     assert_docker "$CPARENTPS
-docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CIMG -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.cpus.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
+docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CIMG -f <tmp>/compose.rovols.yaml -f $SD/compose/compose/sys/docker-compose.cpus.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
     assert_launcher_output_contains "Using CPUS: 2"
     unset OPENCODE_CPUS
 }
@@ -272,7 +272,7 @@ docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/en
     printf '%s\n' 'OPENCODE_CPUSET=2-3' 'OPENCODE_CPUS=2' >"$dotfile"
     run_launcher "$dotfile" compose config --services
     assert_docker "$CPARENTPS
-docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CIMG -f <tmp>/docker-compose.git.yml -f $SD/compose/compose/sys/docker-compose.cpuset.yml -f $SD/compose/compose/sys/docker-compose.cpus.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
+docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CIMG -f <tmp>/compose.rovols.yaml -f $SD/compose/compose/sys/docker-compose.cpuset.yml -f $SD/compose/compose/sys/docker-compose.cpus.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
     assert_launcher_output_contains "Using CPUSET: 2-3"
     assert_launcher_output_contains "Using CPUS: 2"
     unset OPENCODE_CPUSET OPENCODE_CPUS
@@ -498,26 +498,19 @@ _config_roots_env() {
         || fail "the existing project config was wiped on a second launch"
 }
 
-@test "skills_copied_into_config" {
-    # The image component's skill (which toolchain the image ships) is copied
-    # into the project config directory, which compose mounts at
-    # ~/.config/opencode for every service. It is a skills/<name>/SKILL.md
-    # directory, the layout opencode discovers - the flat file that used to
-    # be bind-mounted was never loaded, and its mount target inside the
-    # already-mounted config dir left root-owned 0-byte files behind on the
-    # host. The copy itself never reaches the compose command, and a skill of
-    # another component (a variant switch) is dropped, not left behind.
-    local stale="$SD/config-root/projects/ws/skills/available-full-tools"
-    mkdir -p "$stale"
-    echo 'stale' >"$stale/SKILL.md"
-
+@test "skills_mounted_into_container" {
+    # The image component's skill (which toolchain the image ships) is
+    # bind-mounted read-only from the repository into the container at
+    # /opt/opencode/skills, through the read-only volume override compose
+    # merges (opencode.json points "skills" at that directory). It is never
+    # copied into the project config: that directory is the seed-once template
+    # tree the config root mounts for every service, and the launcher only
+    # creates it, never writes into it after seeding.
     run_launcher /dev/null up
     assert_rc 0 "$LAUNCH_RC" "the skills injection launch reaches compose"
 
-    local skill="$SD/config-root/projects/ws/skills/available-duck-tools/SKILL.md"
-    [[ -f "$skill" ]] || fail "the component skill was not copied into the project config"
-    cmp -s "$skill" "$SD/compose/opencode/skills/available-duck-tools/SKILL.md" \
-        || fail "the copied skill differs from the source"
-    [[ ! -e "$stale" ]] || fail "the previous component's skill was left behind"
-    assert_docker_lacks "skills"
+    # The mount itself, exactly as the override hands it to compose.
+    assert_override_contains "      - $SD/compose/opencode/skills/available-duck-tools:/opt/opencode/skills/available-duck-tools:ro"
+    [[ ! -e "$SD/config-root/projects/ws/skills" ]] \
+        || fail "the component skill was copied into the project config"
 }
