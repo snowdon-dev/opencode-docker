@@ -12,7 +12,7 @@ load 'lib/helpers'
     # `opencode --server` against the resolved host port -> ps.
     # The default image layer is v2, so the health path is "/" and the TUI takes
     # the backend as a global flag; t_start_v1 pins v1 for the other branch.
-    run_launcher /dev/null start --model gpt
+    run_launcher /dev/null start --verbose --model gpt
     assert_docker_contains "docker ps -q --filter label=dev.snowdon.opencode.managed=true"
     assert_docker_contains "$CBASE up -d opencode"
     assert_docker_contains "$CBASE port opencode 4096"
@@ -101,9 +101,9 @@ load 'lib/helpers'
     # Inside the network the backend is on its private port, so the probe URL is
     # the service name and the container port (http://opencode:4096 + the v2
     # health path), never a published host port.
-    # The service's entrypoint is `start-tui 0` (docker-compose.yml), so the
+    # The service's command is `start-tui 0` (docker-compose.yml), so the
     # launcher only forwards the origin and the user's own arguments.
-    run_launcher_no_host_opencode /dev/null start --model gpt
+    run_launcher_no_host_opencode /dev/null start --verbose --model gpt
 
     # The compose args must NOT include the port override.
     local cbase_no_port="docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CIMG -f <tmp>/compose.rovols.yaml"
@@ -120,8 +120,8 @@ load 'lib/helpers'
     # inside the container, where the compose service name resolves. The mocked
     # container's health probe fails, which is what drives start down the wait
     # path; the mocked `waitforserver` then succeeds. The TUI is then run as the
-    # one-off `tui` service, whose entrypoint is the container-side start-tui.
-    OPENCODE_TEST_HEALTH_FAIL=1 run_launcher_no_host_opencode /dev/null start --model gpt
+    # one-off `tui` service, whose command is the container-side start-tui.
+    OPENCODE_TEST_HEALTH_FAIL=1 run_launcher_no_host_opencode /dev/null start --verbose --model gpt
     local cbase_no_port="docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CIMG -f <tmp>/compose.rovols.yaml"
     assert_docker_contains "$cbase_no_port exec -d -w /workspace/project opencode start-serve-backend"
     assert_docker_contains "$cbase_no_port exec -T -w /workspace/project opencode waitforserver http://127.0.0.1:4096"
@@ -173,21 +173,20 @@ load 'lib/helpers'
     # --path project name in the repo home, which is created (empty) for us.
     local name="proj-scaffold"
     mkdir -p "$SD/repos"
-    run_launcher /dev/null scaffold --path "$name" "test task"
+    run_launcher /dev/null scaffold --verbose --path "$name" "test task"
     # The one-off compose run uses the scaffold container name and --auto, then
     # the cleanup removes the container by name.
-    assert_docker_contains "oc-scaffold-<pid> opencode exec"
-    assert_docker_contains "opencode --auto"
+    assert_docker_contains "oc-scaffold-<pid> opencode opencode run --auto"
     assert_docker_contains "docker rm -f -v oc-scaffold-<pid>"
     assert_launcher_output_contains "Creating $SD/repos/proj-scaffold"
     assert_launcher_output_contains "Running on opencode project: proj-scaffold"
 }
 
-@test "scaffold_path" {
-    # Without --path the positional is a real path resolved against the cwd:
-    # './proj' scaffolds (creates) $PWD/proj.
-    run_launcher /dev/null scaffold ./proj-scaffold "test task"
-    assert_docker_contains "oc-scaffold-<pid> opencode exec"
+@test "scaffold_target" {
+    # --target is a real path resolved against the cwd: './proj' scaffolds
+    # (creates) $PWD/proj.
+    run_launcher /dev/null scaffold --verbose --target ./proj-scaffold "test task"
+    assert_docker_contains "oc-scaffold-<pid> opencode opencode run --auto"
     assert_docker_contains "docker rm -f -v oc-scaffold-<pid>"
     assert_launcher_output_contains "Creating $SD/ws/proj-scaffold"
     assert_launcher_output_contains "Running on opencode project: proj-scaffold"
@@ -196,13 +195,11 @@ load 'lib/helpers'
 @test "bg" {
     # bg runs against an existing (non-empty) workspace: unlike scaffold there is
     # no empty-directory requirement, so the sandbox ws (which has a .git dir) is
-    # used directly via './'. First positional is the path (like scaffold), the
-    # second is the task.
-    run_launcher /dev/null bg ./ "test task"
+    # used directly via --target ./.
+    run_launcher /dev/null bg --verbose --target ./ "test task"
     # The one-off compose run uses the bg container name and runs the
     # non-interactive agent, then the cleanup removes the container by name.
-    assert_docker_contains "oc-bg-<pid> opencode exec"
-    assert_docker_contains "opencode run --auto"
+    assert_docker_contains "oc-bg-<pid> opencode opencode run --auto"
     assert_docker_contains "docker rm -f -v oc-bg-<pid>"
     assert_launcher_output_contains "Using existing directory: $SD/ws"
     assert_launcher_output_contains "Running background task on opencode project: ws"
@@ -212,8 +209,8 @@ load 'lib/helpers'
     # --path targets an existing project under SD_REPO_HOME. bg never creates the
     # directory (unlike scaffold), so it must already exist.
     mkdir -p "$SD/repos/proj-bg"
-    run_launcher /dev/null bg --path proj-bg "test task"
-    assert_docker_contains "oc-bg-<pid> opencode exec"
+    run_launcher /dev/null bg --verbose --path proj-bg "test task"
+    assert_docker_contains "oc-bg-<pid> opencode opencode run --auto"
     assert_docker_contains "docker rm -f -v oc-bg-<pid>"
     assert_launcher_output_contains "Using existing directory: $SD/repos/proj-bg"
     assert_launcher_output_contains "Running background task on opencode project: proj-bg"
@@ -223,7 +220,7 @@ load 'lib/helpers'
     # bg never creates its target: a missing directory aborts before any
     # container work (no docker command is issued at all).
     local rc=0
-    run_launcher /dev/null bg ./missing "test task"
+    run_launcher /dev/null bg --target ./missing "test task"
     rc=$LAUNCH_RC
     assert_launcher_output_contains "bg requires an existing directory: $SD/ws/missing"
     [[ "$rc" -ne 0 ]] || fail "bg did not exit non-zero for a missing directory"
@@ -235,20 +232,21 @@ load 'lib/helpers'
     # changes with a running container: git analysis via the container-side
     # git-changes helper (exec -T), then opencode run --agent plan --auto via
     # exec -T (non-interactive).
-    run_launcher /dev/null changes
+    run_launcher /dev/null changes --verbose
     assert_docker_contains "$CBASE ps -q opencode"
-    assert_docker_contains "$CBASE exec -T -w /workspace/project opencode git-changes"
-    assert_docker_contains "$CBASE exec -T -w /workspace/project opencode opencode run --agent plan --auto"
+    assert_docker_contains "$CBASE exec -T $CUSER -w /workspace/project opencode git-changes"
+    assert_docker_contains "$CBASE exec -T $CUSER -w /workspace/project opencode opencode run --agent plan --auto"
     assert_launcher_output_contains "Analyzing changes for project: ws"
 }
 
 @test "changes_nocontainer" {
-    # No running container -> both steps use a throwaway `compose run`, via
-    # --entrypoint /bin/sh so the git-analysis helper and opencode are exec'd.
+    # No running container -> both steps use a throwaway `compose run`, run
+    # with the service's own entrypoint so the helper and opencode are exec'd
+    # directly.
     OPENCODE_TEST_NO_CONTAINER=1 run_launcher /dev/null changes
     assert_docker_contains "$CBASE ps -q opencode"
-    assert_docker_contains "$CBASE run --rm -w /workspace/project --entrypoint /bin/sh opencode -c exec \"\$@\" sh git-changes"
-    assert_docker_contains "$CBASE run --rm -w /workspace/project --entrypoint /bin/sh opencode -c exec \"\$@\" sh opencode run --agent plan --auto"
+    assert_docker_contains "$CBASE run --rm -w /workspace/project opencode git-changes"
+    assert_docker_contains "$CBASE run --rm -w /workspace/project opencode opencode run --agent plan --auto"
 }
 
 @test "changes_output" {
@@ -262,7 +260,7 @@ load 'lib/helpers'
 
     # The gather composes from the plain args: the io override joins them only
     # afterwards, so no command carrying it may have been the gather.
-    assert_docker_contains "$CBASE exec -T -w /workspace/project opencode git-changes"
+    assert_docker_contains "$CBASE exec -T $CUSER -w /workspace/project opencode git-changes"
     assert_docker_lacks "$CBASE -f <tmp>/docker-compose.io.yml exec"
     # The agent step: the io override plus a one-off oc-changes container
     # running a plain `opencode run` - never the plan agent, which would refuse
@@ -278,9 +276,9 @@ load 'lib/helpers'
     # for the single file output.
     assert_file_contains "$SD/changes-plan.md" "mocked io plan"
     assert_launcher_output_contains "Plan written to: $SD/changes-plan.md"
-    assert_launcher_output_contains "Run it with: opencode:bg ./ < $SD/changes-plan.md"
+    assert_launcher_output_contains "Run it with: opencode:bg --target ./ < $SD/changes-plan.md"
     # ... all via the one-off container, never the running container's exec.
-    assert_docker_lacks "exec -T -w /workspace/project opencode opencode run"
+    assert_docker_lacks "exec -T $CUSER -w /workspace/project opencode opencode run"
     assert_rc 0 "$LAUNCH_RC" "changes --output"
 }
 
@@ -389,7 +387,7 @@ _run_git_changes() {
     # creation) carrying the io override, with the task passed on the command
     # line. The mock fills in the output, so io can report it.
     _io_plan_env "$SD/io-plan.md"
-    run_launcher "$SD/io.env" io --output "$SD/io-plan.md" "plan the io feature"
+    run_launcher "$SD/io.env" io --verbose --output "$SD/io-plan.md" "plan the io feature"
 
     assert_docker_contains "$CBASE -f <tmp>/docker-compose.io.yml run --rm -T --name oc-io-<pid>"
     assert_docker_contains "opencode run --auto"
@@ -427,7 +425,7 @@ _run_git_changes() {
     # workspace mount at exactly that file, so the agent sees one file at its
     # normal workspace path instead of a second, host-shaped one.
     _io_plan_env "$SD/ws/plan.md"
-    run_launcher "$SD/io.env" io --output ./plan.md "plan inside the workspace"
+    run_launcher "$SD/io.env" io --verbose --output ./plan.md "plan inside the workspace"
 
     assert_launcher_output_contains "Read-only workspace mount: $SD/ws -> /workspace/project"
     assert_launcher_output_contains "Writable output mount: $SD/ws/plan.md -> /workspace/project/plan.md"
@@ -443,7 +441,7 @@ _run_git_changes() {
     local out1="$SD/multi-a.md" out2="$SD/multi-b.md" outdir="$SD/multi-dir"
     mkdir -p "$outdir"
     _io_plan_env "$out1" "$out2" "$outdir"
-    run_launcher "$SD/io.env" io \
+    run_launcher "$SD/io.env" io --verbose \
         --output "$out1" --output "$out2" --output "$outdir" "write all outputs"
 
     assert_docker_contains "$CBASE -f <tmp>/docker-compose.io.yml run --rm -T --name oc-io-<pid>"
@@ -467,7 +465,7 @@ _run_git_changes() {
     mkdir -p "$outdir"
     echo "pre-existing" >"$outdir/keep.md"
     _io_plan_env "$outdir"
-    run_launcher "$SD/io.env" io --output "$outdir" "write into the directory"
+    run_launcher "$SD/io.env" io --verbose --output "$outdir" "write into the directory"
 
     assert_docker_contains "$CBASE -f <tmp>/docker-compose.io.yml run --rm -T --name oc-io-<pid>"
     assert_launcher_output_contains "Writable output mount: $outdir -> $outdir"

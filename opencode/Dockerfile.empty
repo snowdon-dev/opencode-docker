@@ -21,12 +21,16 @@ ENV COLORTERM=truecolor
 RUN addgroup -g $USER_GID $USERNAME \
     && adduser -D -u $USER_UID -G $USERNAME $USERNAME \
     && mkdir -p \
-        /home/$USERNAME/.local/state \
-        /home/$USERNAME/.local/share \
-        /home/$USERNAME/.config \
-        /opt/opencode/skills \
+        /home/$USERNAME/.local/state/opencode \
+        /home/$USERNAME/.local/share/opencode \
+        /home/$USERNAME/.config/opencode \
+        /etc/opencode/skills \
     && chown -R $USER_UID:$USER_GID /home/$USERNAME \
-    && chown -R $USER_UID:$USER_GID /opt/opencode
+    && chown -R $USER_UID:$USER_GID /etc/opencode
+
+COPY ./scripts/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh && chown "$USER_UID:$USER_GID" /entrypoint.sh
+ENTRYPOINT [ "/entrypoint.sh" ]
 
 # ------------------------------------------------------------
 # Packages setup
@@ -58,7 +62,8 @@ RUN apk add --no-cache \
     jq~1 \
     shellcheck~0 \
     yamllint~1 \
-    yq~4
+    yq~4 \
+    su-exec
 
 
 ENV EDITOR=nvim
@@ -84,12 +89,6 @@ RUN git --version \
     && gh --version
 
 # ------------------------------------------------------------
-# Start user config
-# ------------------------------------------------------------
-# Switch to the non-root user
-USER $USERNAME
-
-# ------------------------------------------------------------
 # End
 # ------------------------------------------------------------
 
@@ -99,8 +98,4 @@ ENV XDG_DATA_HOME="/home/${USERNAME}/.local/share"
 ENV XDG_CACHE_HOME="/home/${USERNAME}/.cache"
 ENV XDG_CONFIG_HOME="/home/${USERNAME}/.config"
 
-
-# Workspace used by opencode
-WORKDIR /workspace/project
 ENV HOME=/home/$USERNAME
-ENV OPENCODE_CONFIG_DIR=/opt/opencode

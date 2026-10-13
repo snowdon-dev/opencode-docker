@@ -16,10 +16,25 @@ $CPARENTPS
 $CINFO"
 }
 
+@test "up_quiet_by_default" {
+    # up without --verbose: the container comes up exactly as with the flag,
+    # but the launcher's status lines ("Using ws", "Starting opencode
+    # container") stay home. --verbose puts them back (pinned by "new").
+    run_launcher /dev/null up
+    assert_docker "$CPARENTPS
+$CBASE up -d opencode
+$CWSPS
+$CINFO
+$CPARENTPS
+$CINFO"
+    assert_launcher_output_lacks "Using ws:"
+    assert_launcher_output_lacks "Starting opencode container"
+}
+
 @test "new" {
     # new: opencode:stop (find + stop all managed containers) then opencode (full
     # start sequence: ensure_up, TUI, verify).
-    run_launcher /dev/null new "do something"
+    run_launcher /dev/null new --verbose "do something"
     assert_docker_contains "docker ps -q --filter label=dev.snowdon.opencode.managed=true"
     assert_docker_contains "docker stop c1"
     assert_docker_contains "$CBASE up -d opencode"
@@ -32,7 +47,7 @@ $CINFO"
     # setup calls _opencode_ensure_up (up -d --no-recreate so an existing
     # session is never disturbed) first, then opencode:list to show
     # the container, then _opencode_dispatch.
-    run_launcher /dev/null setup "npm install"
+    run_launcher /dev/null setup --verbose "npm install"
     assert_docker "$CPARENTPS
 $CBASE up -d --no-recreate opencode
 $CWSPS
@@ -40,7 +55,7 @@ $CINFO
 $CPARENTPS
 $CINFO
 $CBASE ps -q opencode
-$CBASE exec -T -w /workspace/project opencode npm install"
+$CBASE exec -T $CUSER -w /workspace/project opencode npm install"
     assert_launcher_output_contains "Setting up opencode project: ws"
 }
 
@@ -66,11 +81,10 @@ $CBASE exec -T -w /workspace/project opencode npm install"
     git -C "$SD/ws" worktree add -q -B feature/my-branch \
         "$SD/repos/agent-trees/ws-feature-my-branch"
 
-    run_launcher /dev/null uptree --branch feature/my-branch
+    run_launcher /dev/null uptree --verbose --branch feature/my-branch
     assert_rc 0 "$LAUNCH_RC" "uptree --branch exits zero"
     assert_launcher_output_contains \
-        "Using opencode workspace: $SD/repos/agent-trees/ws-feature-my-branch"
-    assert_launcher_output_contains "Compose project: ws-feature-my-branch"
+        "Using ws-feature-my-branch: $SD/repos/agent-trees/ws-feature-my-branch"
     assert_docker_contains "docker compose -p ws-feature-my-branch"
     assert_docker_contains "up -d opencode"
 }
@@ -84,9 +98,10 @@ $CBASE exec -T -w /workspace/project opencode npm install"
     git -C "$SD/ws" worktree add -q -B feature/my-branch \
         "$SD/repos/agent-trees/ws-feature-my-branch"
 
-    run_launcher /dev/null uptree --branch feature/my-branch "$SD/ws"
+    run_launcher /dev/null uptree --verbose --branch feature/my-branch "$SD/ws"
     assert_rc 0 "$LAUNCH_RC" "uptree --branch <branch> <workspace> exits zero"
-    assert_launcher_output_contains "Compose project: ws-feature-my-branch"
+    assert_launcher_output_contains \
+        "Using ws-feature-my-branch: $SD/repos/agent-trees/ws-feature-my-branch"
 
     run_launcher /dev/null uptree --branch
     assert_rc 2 "$LAUNCH_RC" "uptree --branch without a name is a usage error"
@@ -103,12 +118,11 @@ $CBASE exec -T -w /workspace/project opencode npm install"
         "$SD/repos/agent-trees/ws-feature-my-branch"
 
     LAUNCH_CWD="$SD/repos/agent-trees/ws-feature-my-branch" \
-        run_launcher /dev/null uptree --branch feature/my-branch
+        run_launcher /dev/null uptree --verbose --branch feature/my-branch
     unset LAUNCH_CWD
     assert_rc 0 "$LAUNCH_RC" "uptree --branch from a worktree exits zero"
     assert_launcher_output_contains \
-        "Using opencode workspace: $SD/repos/agent-trees/ws-feature-my-branch"
-    assert_launcher_output_contains "Compose project: ws-feature-my-branch"
+        "Using ws-feature-my-branch: $SD/repos/agent-trees/ws-feature-my-branch"
 }
 
 @test "uptree_branch_missing" {

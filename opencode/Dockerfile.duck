@@ -51,5 +51,3 @@ if [ -n "${HOME}" ]; then
     unset dir
 fi
 EOF
-
-USER $USERNAME

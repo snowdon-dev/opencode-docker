@@ -8,10 +8,21 @@ load 'lib/helpers'
 @test "stop" {
     # stop: dispatched before workspace resolution, discovers managed containers
     # via _select_managed_containers (all workspaces by default), stops each.
-    run_launcher /dev/null stop
+    # --verbose is a global flag: main() strips it before dispatch, so it can
+    # sit before the subcommand as well as after it (see "stop_quiet_by_default").
+    run_launcher /dev/null --verbose stop
     assert_docker_contains "docker ps -q --filter label=dev.snowdon.opencode.managed=true"
     assert_docker_contains "docker stop c1"
     assert_launcher_output_contains "Stopping existing opencode containers"
+}
+
+@test "stop_quiet_by_default" {
+    # stop without --verbose: same discovery and the same docker stop, but the
+    # status line stays home. --verbose puts it back (pinned by "stop").
+    run_launcher /dev/null stop
+    assert_docker_contains "docker ps -q --filter label=dev.snowdon.opencode.managed=true"
+    assert_docker_contains "docker stop c1"
+    assert_launcher_output_lacks "Stopping existing opencode containers"
 }
 
 @test "stop_dry_run" {
@@ -36,7 +47,7 @@ load 'lib/helpers'
 @test "down" {
     # down: compose down clears the project's networks/volumes, then stop is
     # called workspace-scoped to catch any remaining managed containers (TUI).
-    run_launcher /dev/null down
+    run_launcher /dev/null down --verbose
     assert_docker_contains "$CBASE down"
     assert_docker_contains "docker ps -q --filter label=dev.snowdon.opencode.managed=true"
     assert_docker_contains "docker stop c1"
@@ -392,7 +403,7 @@ docker network rm net-other"
     make_git_workspace
     git -C "$SD/ws" worktree add -q -b wt-branch "$SD/wt"
 
-    LAUNCH_CWD="$SD/wt" run_launcher /dev/null up
+    LAUNCH_CWD="$SD/wt" run_launcher /dev/null up --verbose
     unset LAUNCH_CWD
 
     # A worktree resolves straight to itself (its parent is known from the .git

@@ -35,12 +35,18 @@ Run commands through the launcher; the workspace defaults to the current
 directory. Every command has its own help: `opencode:help <command>` or
 `opencode:<command> -h`.
 
+Every command is quiet by default: errors, warnings, results and prompts
+still print, but the launcher's status lines (which container or workspace it
+picked, what it is waiting for) do not. Pass the global flag `--verbose`
+(before or after the subcommand) to see them; `opencode:help` documents the
+behaviour.
+
 | Command | Alias | Purpose |
 |---------|-------|---------|
 | **Start & one-off runs** | | |
 | `opencode` (`start`) | `oc` | (Re)create the container and attach a TUI |
-| `opencode:scaffold [path] <task>` | `ocsf` | Create a new project with opencode (task via stdin) |
-| `opencode:bg [path] <task>` | `ocbg` | Run a one-off opencode task (an opencode run in the service) on an existing project |
+| `opencode:scaffold [--target <path>] <task>` | `ocsf` | Create a new project with opencode (task via stdin) |
+| `opencode:bg [--target <path>] <task>` | `ocbg` | Run a one-off opencode task (an opencode run in the service) on an existing project |
 | `opencode:changes [--output <path>]... [task]` | `occh` | Analyse the branch changes and propose a plan, optionally into a writable output (`--output`, workspace read-only), then run it with `opencode:bg` |
 | `opencode:io --output <path>... [task]` | `ocio` | Run a task against a read-only workspace with N writable outputs (`--output` file or directory, repeatable; `--allow-empty`) |
 | `opencode:repl` | `ocrepl` | Interactive bash shell bound to the workspace |
@@ -74,6 +80,7 @@ directory. Every command has its own help: `opencode:help <command>` or
 
 <details>
 <summary>View command directory cli options</summary>
+
 ### Common directory options
 
 Accepted by `stop`, `delete`, `ls` and `down` (each honours the subset that
@@ -135,16 +142,16 @@ opencode:setup sh -c 'cd front-end && npm install' && opencode
 # tasks, replacing the session or analysing the branch first
 opencode -c --auto
 opencode:changes "identify issues in these changes"
-opencode:bg ./ "refactor this module"
+opencode:bg --target ./ "refactor this module"
 
 # plan with the workspace read-only (only --output is writable), then run the
 # plan with bg; changes --output plans the branch changes the same way
 opencode:changes --output /tmp/plan.md
 opencode:io --output /tmp/out.md < /tmp/create-task-plan.md
-opencode:bg ./ < /tmp/out.md
+opencode:bg --target ./ < /tmp/out.md
 
 # new projects, either with a real path or under $SD_REPO_HOME
-opencode:scaffold /tmp/project < /tmp/sometask.md
+opencode:scaffold --target /tmp/project < /tmp/sometask.md
 opencode:scaffold --path gists/project-1 "Create basic hello world html project"
 
 # workspace assets, and an agent worktree to run in
@@ -258,10 +265,7 @@ A simple root template for opencode v2 could could be
        }
      }
    },
-  "variant": "low",
-  "skills": [
-    "/opt/opencode/skills"
-  ]
+  "variant": "low"
 }
 ```
 
@@ -528,7 +532,7 @@ The function is valid in a zsh shell:
 ```shell
 gist() {
     if (( $# == 0 )); then
-        echo "No arguments, requires [path] (task)"
+        echo "No arguments, requires <name> (task)"
         echo "Task can also be via standard in"
     fi
 
@@ -547,7 +551,7 @@ gist() {
             mkdir "$tmp_path"
             echo "cd:    $tmp_path"
             cd "$tmp_path"
-            echo 'run:   opencode:scaffold ./ "Your task"'
+            echo 'run:   opencode:scaffold --target ./ "Your task"'
             return
         fi
 
@@ -562,7 +566,7 @@ gist() {
         fi
 
         # start fresh environment to prevent reusing a projects defaults
-        env -i ZDOTDIR="$ZDOTDIR" zsh -ic 'opencode:scaffold ./ "$@"' zsh "$@"
+        env -i ZDOTDIR="$ZDOTDIR" zsh -ic 'opencode:scaffold --target ./ "$@"' zsh "$@"
     }
 }
 ```

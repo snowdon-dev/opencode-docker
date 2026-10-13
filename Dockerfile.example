@@ -2,11 +2,7 @@
 # github.com/snowdon-dev/opencode-docker base image.
 #
 # This file is intended for local/user-specific customizations.
-# To keep it ignored by Git, modify your local index:
-#   git update-index --assume-unchanged Dockerfile
-#   git update-index --skip-worktree Dockerfile
-# If you want to start tracking the file again:
-#   git update-index --no-assume-unchanged Dockerfile
+# First cp "$SD_OPENCODE/Dockerfile.example ~/my-custom-build/Dockerfile.dev
 #
 # For project specific images, point your opencode at your project the laucnher 
 # will then build the container from your project workspace.
@@ -39,9 +35,7 @@ ARG PROJECT_WORKSPACE_PARENT
 LABEL dev.snowdon.opencode.workspace="${PROJECT_WORKSPACE}"
 LABEL dev.snowdon.opencode.workspace_parent="${PROJECT_WORKSPACE_PARENT}"
 
-#USER root
 # apk add --no-cache jq
 # apk add --no-cache \
 #   wget yq neovim iproute2 bind-tools netcat-openbsd 
 #RUN apk add shellcheck shfmt
-USER other

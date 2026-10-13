@@ -4,7 +4,7 @@
 #
 # $1          1 when the opencode CLI is on the host (the launcher runs this
 #             script itself), 0 when it runs as the container-side `tui`
-#             service (see the entrypoint in docker-compose.yml). It is shifted
+#             service (see the `command` in docker-compose.yml). It is shifted
 #             off so it never reaches opencode.
 # $BACKEND_ORIGIN  where the backend answers: the published host port on the
 #             host side, the compose service name inside the network.

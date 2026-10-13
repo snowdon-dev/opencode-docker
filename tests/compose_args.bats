@@ -187,7 +187,7 @@ docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/en
     # OPENCODE_CACHE=false mounts no toolchain caches.
     local dotfile="$SD/cache.env"
     echo 'OPENCODE_CACHE=false' >"$dotfile"
-    run_launcher "$dotfile" compose config --services
+    run_launcher "$dotfile" compose --verbose config --services
     assert_docker "$CPARENTPS
 $CBASE config --services"
     assert_launcher_output_contains "Running without toolchain cache"
@@ -245,7 +245,7 @@ $CBASE config --services"
     echo 'services: { opencode: {} }' >"$SD/compose/compose/sys/docker-compose.cpus.yml"
     local dotfile="$SD/cpu.env"
     echo 'OPENCODE_CPUSET=2-3' >"$dotfile"
-    run_launcher "$dotfile" compose config --services
+    run_launcher "$dotfile" compose --verbose config --services
     assert_docker "$CPARENTPS
 docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CIMG -f <tmp>/compose.rovols.yaml -f $SD/compose/compose/sys/docker-compose.cpuset.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
     assert_launcher_output_contains "Using CPUSET: 2-3"
@@ -257,7 +257,7 @@ docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/en
     echo 'services: { opencode: {} }' >"$SD/compose/compose/sys/docker-compose.cpus.yml"
     local dotfile="$SD/cpu.env"
     echo 'OPENCODE_CPUS=2' >"$dotfile"
-    run_launcher "$dotfile" compose config --services
+    run_launcher "$dotfile" compose --verbose config --services
     assert_docker "$CPARENTPS
 docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CIMG -f <tmp>/compose.rovols.yaml -f $SD/compose/compose/sys/docker-compose.cpus.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
     assert_launcher_output_contains "Using CPUS: 2"
@@ -270,7 +270,7 @@ docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/en
     echo 'services: { opencode: {} }' >"$SD/compose/compose/sys/docker-compose.cpus.yml"
     local dotfile="$SD/cpu.env"
     printf '%s\n' 'OPENCODE_CPUSET=2-3' 'OPENCODE_CPUS=2' >"$dotfile"
-    run_launcher "$dotfile" compose config --services
+    run_launcher "$dotfile" compose --verbose config --services
     assert_docker "$CPARENTPS
 docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CIMG -f <tmp>/compose.rovols.yaml -f $SD/compose/compose/sys/docker-compose.cpuset.yml -f $SD/compose/compose/sys/docker-compose.cpus.yml -f $SD/compose/compose/sys/docker-compose.port.yml config --services"
     assert_launcher_output_contains "Using CPUSET: 2-3"
@@ -294,7 +294,7 @@ docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/en
 
     printf 'test-api-key-123\n' >"$SD/opencode.key"
     printf 'OPENCODE_KEY_FILE=%s\n' "$SD/opencode.key" >"$SD/key.env"
-    run_launcher "$SD/key.env" up
+    run_launcher "$SD/key.env" up --verbose
     assert_rc 0 "$LAUNCH_RC" "up with a key file exits zero"
     assert_docker_contains \
         "-f $SD/compose/compose/secret/docker-compose.secret.yml"
@@ -311,7 +311,7 @@ docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/en
     # /run/secrets/api_key is absent). The sandbox key path is the
     # run_launcher default - a file that does not exist, which is what a
     # host without ~/.config/opencode-docker/opencode.key looks like.
-    run_launcher /dev/null up
+    run_launcher /dev/null up --verbose
     assert_rc 0 "$LAUNCH_RC" "up without a key file exits zero"
     assert_docker_lacks "docker-compose.secret.yml"
     assert_launcher_output_lacks "Using api key secret"
@@ -323,7 +323,7 @@ docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/en
     # case - an empty secret would only give the backend an empty key.
     : >"$SD/opencode.key"
     printf 'OPENCODE_KEY_FILE=%s\n' "$SD/opencode.key" >"$SD/key.env"
-    run_launcher "$SD/key.env" up
+    run_launcher "$SD/key.env" up --verbose
     assert_rc 0 "$LAUNCH_RC" "up with an empty key file exits zero"
     assert_docker_lacks "docker-compose.secret.yml"
     assert_launcher_output_lacks "Using api key secret"
@@ -438,7 +438,7 @@ _network_default_env() {
     _network_default_env
     OPENCODE_TEST_NETWORK_CREATE_FAIL=1 \
     OPENCODE_TEST_NETWORK_NAME_MAP="sd-ws-default=$SD/ws" \
-        run_launcher "$SD/net.env" up
+        run_launcher "$SD/net.env" up --verbose
     unset OPENCODE_NETWORK
 
     assert_rc 0 "$LAUNCH_RC" "up continues with the network the other launch created"
@@ -466,7 +466,7 @@ _config_roots_env() {
     # put it, and the template really lands there.
     _config_roots_env
     echo '{"seed":"template-v1"}' >"$SD/config-root/template/opencode.json"
-    run_launcher "$SD/config.env" compose config --services
+    run_launcher "$SD/config.env" compose --verbose config --services
     assert_rc 0 "$LAUNCH_RC" "the seeding launch reaches compose"
     assert_launcher_output_contains \
         "Creating project config at: $SD/config-root/projects/ws"
@@ -490,7 +490,7 @@ _config_roots_env() {
     echo 'project local' >"$SD/config-root/projects/ws/local.conf"
     echo '{"seed":"template-v2"}' >"$SD/config-root/template/opencode.json"
 
-    run_launcher "$SD/config.env" compose config --services
+    run_launcher "$SD/config.env" compose --verbose config --services
     assert_rc 0 "$LAUNCH_RC" "the second launch reaches compose"
     assert_launcher_output_lacks "Creating project config at:"
     assert_file_contains "$SD/config-root/projects/ws/opencode.json" 'template-v1'
@@ -501,7 +501,7 @@ _config_roots_env() {
 @test "skills_mounted_into_container" {
     # The image component's skill (which toolchain the image ships) is
     # bind-mounted read-only from the repository into the container at
-    # /opt/opencode/skills, through the read-only volume override compose
+    # /etc/opencode/skills, through the read-only volume override compose
     # merges (opencode.json points "skills" at that directory). It is never
     # copied into the project config: that directory is the seed-once template
     # tree the config root mounts for every service, and the launcher only
@@ -510,7 +510,7 @@ _config_roots_env() {
     assert_rc 0 "$LAUNCH_RC" "the skills injection launch reaches compose"
 
     # The mount itself, exactly as the override hands it to compose.
-    assert_override_contains "      - $SD/compose/opencode/skills/available-duck-tools:/opt/opencode/skills/available-duck-tools:ro"
+    assert_override_contains "      - $SD/compose/opencode/skills/available-duck-tools:/etc/opencode/skills/available-duck-tools:ro"
     [[ ! -e "$SD/config-root/projects/ws/skills" ]] \
         || fail "the component skill was copied into the project config"
 }

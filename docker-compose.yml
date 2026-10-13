@@ -2,9 +2,11 @@ services:
     opencode:
         init: true
         # restart: unless-stopped
-        entrypoint: ["/bin/sh", "-c"]
-        command:
-            - "sleep 999999999d"
+        command: ["sleep", "999999999d"]
+        environment:
+            PROJECT_WORKSPACE: ${WORKSPACE:-${SD_OPENCODE}}
+            HOST_UID: "${HOST_UID:-1000}"
+            HOST_GID: "${HOST_GID:-1000}"
         labels:
             - "dev.snowdon.opencode.managed=true"
             - "dev.snowdon.opencode.workspace=${WORKSPACE}"
@@ -25,7 +27,7 @@ services:
         image: ${OPENCODE_IMAGE_URL_TUI:-devsnowdon/opencode-docker:empty-v1}
         stdin_open: true
         tty: true
-        entrypoint: ["start-tui", "0"]
+        command: ["start-tui", "0"]
         labels:
             - "dev.snowdon.opencode.managed=true"
             - "dev.snowdon.opencode.tui=true"

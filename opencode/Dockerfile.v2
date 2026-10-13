@@ -31,7 +31,6 @@ COPY --chown=${USERNAME}:${USERNAME} opencode/agent.md /home/${USERNAME}/.config
 # tui.json (and the keybind is spelled `terminal.suspend`, not `terminal_suspend`).
 COPY --chown=${USERNAME}:${USERNAME} opencode/cli.json /home/${USERNAME}/.config/opencode/cli.json
 
-USER root
 COPY --from=opencode /usr/local/bin/opencode /usr/local/bin/opencode
 RUN chmod +x /usr/local/bin/opencode
 
@@ -49,7 +48,4 @@ RUN chmod 755 /usr/local/bin/waitforserver \
     /usr/local/bin/start-tui \
     /usr/local/bin/end-serve-backend
 
-USER $USERNAME
 RUN opencode --version
-
-ENTRYPOINT ["opencode"]

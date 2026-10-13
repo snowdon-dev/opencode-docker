@@ -80,7 +80,7 @@ so they do not count as clutter) or here.
   (first launch only); later launches neither wipe nor re-copy it. Delete the
   project directory to re-seed.
 - The image component's skill (`opencode/skills/available-<variant>-tools/SKILL.md`)
-  is bind-mounted read-only into the container at `/opt/opencode/skills` on
+  is bind-mounted read-only into the container at `/etc/opencode/skills` on
   every launch, through the read-only volume override (`compose.rovols.yaml`,
   the same override file that carries the read-only `.git` mounts);
   `opencode.json` points its `skills` list at that directory. The project

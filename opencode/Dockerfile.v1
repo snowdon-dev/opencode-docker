@@ -31,7 +31,6 @@ COPY --chown=${USERNAME}:${USERNAME} opencode/agent.md /home/${USERNAME}/.config
 # inside a docker tty that freezes the session with no way to Ctrl+C/fg back.
 COPY --chown=${USERNAME}:${USERNAME} opencode/tui.json /home/${USERNAME}/.config/opencode/tui.json
 
-USER root
 COPY --from=opencode /usr/local/bin/opencode /usr/local/bin/opencode
 RUN chmod +x /usr/local/bin/opencode
 
@@ -47,7 +46,4 @@ RUN chmod 755 /usr/local/bin/waitforserver \
     /usr/local/bin/start-tui \
     /usr/local/bin/end-serve-backend
 
-USER $USERNAME
 RUN opencode --version
-
-ENTRYPOINT ["opencode"]

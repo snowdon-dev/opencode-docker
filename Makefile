@@ -212,6 +212,7 @@ test:
 .PHONY: check
 check:
 	shellcheck scripts/launcher.sh \
+		scripts/entrypoint.sh \
 		scripts/waitforserver.sh \
 		scripts/start-serve-backend.sh \
 		scripts/v1/start-tui.sh \
@@ -230,7 +231,8 @@ format:
 # not valid bash for `bash -n`, so they get a parse check through bats itself.
 .PHONY: syntax
 syntax:
-	bash -n scripts/launcher.sh scripts/setup.sh scripts/waitforserver.sh \
+	bash -n scripts/launcher.sh scripts/setup.sh scripts/entrypoint.sh \
+		scripts/waitforserver.sh \
 		scripts/start-serve-backend.sh \
 		scripts/v1/start-tui.sh scripts/v2/start-tui.sh \
 		bin/resolve-opencode-version.sh bin/compare-opencode-version.sh \

@@ -9,7 +9,7 @@ You are the engineering partener agent running in a musl alpine container.
   the project.
 - Other /workspace sub-folders can also be used when creating and working on
   files, and is preferred other folders. However, unlike the /workspace/project
-  folder other children of the /workspace will not be peristed across container
+  folder, other children of /workspace will not be peristed across container
   reboots.
 - Prefer small, reviewable changes.
 - Prefer a test driven approach to development.

@@ -11,7 +11,8 @@
 set -u
 
 # These globals are the library's interface with the suites that load it:
-# CBASE/CPS/CPARENTPS/CMANAGED/CWSPS/CINFO hold the expected command strings,
+# CBASE/CPS/CPARENTPS/CMANAGED/CWSPS/CINFO/CUSER hold the expected command
+# strings,
 # LAUNCH_RC/LAUNCH_OUT/DOCKER_LOG the last run's results, CACHEVOL the cache
 # override dir. They are written here and read by the test files, which this
 # tool cannot analyse, hence the file-wide SC2034 disable below.
@@ -83,6 +84,11 @@ make_sandbox() {
     # directory prompt never fires for them: the tests that exercise that
     # prompt point the roots back at a bare home themselves.
     mkdir -p "$SD/config-root" "$SD/data-root" "$SD/cache-root"
+    # A caller's own OPENCODE_{CONFIG,DATA,CACHE}_DIR would take precedence over
+    # the *_ROOT sandbox paths below (the launcher treats the _DIR form as a
+    # full override), pointing the suite at a real root. Drop them so the run
+    # stays inside the sandbox.
+    unset OPENCODE_CONFIG_DIR OPENCODE_DATA_DIR OPENCODE_CACHE_DIR
     export OPENCODE_CONFIG_ROOT="$SD/config-root"
     export OPENCODE_DATA_ROOT="$SD/data-root"
     export OPENCODE_CACHE_ROOT="$SD/cache-root"
@@ -110,6 +116,9 @@ make_sandbox() {
     # volume mounts, port. The volume override lives in a mktemp dir and is
     # normalised to <tmp>.
     CBASE="docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CIMG -f <tmp>/compose.rovols.yaml -f $SD/compose/compose/sys/docker-compose.port.yml"
+    # Every exec against the running container is pinned to the host user
+    # (the launcher's --user $HOST_UID, defaulting to 1000 in the sandbox).
+    CUSER="--user 1000"
     # Container discovery: the managed label first, then -a, then the scoping
     # label. Shared by every expectation so the flag order is defined once.
     CPS="docker ps -q --filter label=dev.snowdon.opencode.managed=true -a"
