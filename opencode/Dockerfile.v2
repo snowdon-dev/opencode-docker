@@ -47,5 +47,3 @@ RUN chmod 755 /usr/local/bin/waitforserver \
     /usr/local/bin/start-serve-backend \
     /usr/local/bin/start-tui \
     /usr/local/bin/end-serve-backend
-
-RUN opencode --version
