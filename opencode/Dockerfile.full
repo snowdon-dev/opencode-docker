@@ -38,13 +38,15 @@ RUN mkdir -p \
         "/home/${USERNAME}/go" \
         "/home/${USERNAME}/.cache"
 
+USER ${USERNAME}
+
 RUN go install golang.org/x/tools/gopls@v0.21.1 \
     && go install github.com/go-delve/delve/cmd/dlv@v1.27.1 \
     && go install github.com/swaggo/swag/cmd/swag@v1.16.4 \
     && curl -sSfL https://golangci-lint.run/install.sh \
         | sh -s -- -b "$GOPATH/bin" v2.11.4 \
     && go clean -cache -modcache \
-    && chown -R 1000:1000 \
+    && chown -R ${USER_UID}:${USER_GID} \
         "/home/${USERNAME}/go" \
         "/home/${USERNAME}/.cache"
 
@@ -53,6 +55,8 @@ RUN gopls version \
     && dlv version \
     && swag --version \
     && golangci-lint version
+
+USER root
 
 # opencode's `!` command runs a login shell (bash -l), and Alpine's /etc/profile
 # resets PATH to the image baseline, dropping the user-local dirs that the agent's
@@ -123,6 +127,8 @@ ARG TARGETARCH
 ARG USER_HOME=/home/${USERNAME}
 
 
+USER ${USERNAME}
+
 RUN if [ "$INSTALL_RUST" = "true" ]; then \
         case "${TARGETARCH:-$(uname -m)}" in \
             amd64|x86_64) RUSTUP_TRIPLE="x86_64-unknown-linux-musl" ;; \
@@ -173,6 +179,8 @@ RUN if [ "$INSTALL_RUST" = "true" ]; then \
         && cargo --version \
         && sccache --version; \
     fi
+
+USER root
 
 # Configure sccache AFTER it has been installed
 ENV RUSTC_WRAPPER="/home/${USERNAME}/.cargo/bin/sccache"
