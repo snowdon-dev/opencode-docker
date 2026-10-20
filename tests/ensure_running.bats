@@ -55,7 +55,7 @@ $CINFO
 $CPARENTPS
 $CINFO
 $CBASE ps -q opencode
-$CBASE exec -T $CUSER -w /workspace/project opencode npm install"
+$CBASE exec -T -w /workspace/project opencode /entrypoint.sh npm install"
     assert_launcher_output_contains "Setting up opencode project: ws"
 }
 

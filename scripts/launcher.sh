@@ -72,7 +72,6 @@ fi
 CONTAINER_WORKSPACE_ROOT="/workspace/project"
 CONTAINER_USER="${OPENCODE_CONTAINER_USER:-other}"
 CONTAINER_HOME="${OPENCODE_CONTAINER_HOME:-/home/${CONTAINER_USER}}"
-HOST_UID="${HOST_UID:-1000}"
 
 # Published images are tagged <variant>-<version>: one opencode version layer
 # (opencode/Dockerfile.v1, v2 sibling) per variant, on shared toolchain bases.
@@ -1953,10 +1952,10 @@ function _opencode_dispatch() {
         # terminal; with -T the caller captures it.
         if ((interactive)); then
             _driver compose "${opencode_compose_args[@]}" \
-                exec --user "$HOST_UID" -w "$CONTAINER_WORKSPACE_ROOT" opencode "$@"
+                exec -w "$CONTAINER_WORKSPACE_ROOT" opencode /entrypoint.sh "$@"
         else
             _driver compose "${opencode_compose_args[@]}" \
-                exec -T --user "$HOST_UID" -w "$CONTAINER_WORKSPACE_ROOT" opencode "$@"
+                exec -T -w "$CONTAINER_WORKSPACE_ROOT" opencode /entrypoint.sh "$@"
         fi
     else
         # Throwaway container: runs the task and exits, no ports.
@@ -2635,7 +2634,7 @@ function opencode() {
         _driver compose "${opencode_compose_args[@]}" exec \
             -d \
             -w "$CONTAINER_WORKSPACE_ROOT" \
-            opencode "$START_BACKEND_SERVE_EXE"
+            opencode /entrypoint.sh "$START_BACKEND_SERVE_EXE"
 
         _oc_info "Waiting for the opencode backend to launch"
         if ! _wait_for_backend; then
@@ -2678,7 +2677,7 @@ function opencode:execute() {
 
 
     # Interactive exec
-    _driver compose "${opencode_compose_args[@]}" exec --user "$HOST_UID" -it opencode "$@"
+    _driver compose "${opencode_compose_args[@]}" exec -it opencode /entrypoint.sh "$@"
 }
 
 function opencode:shell() {

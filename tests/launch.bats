@@ -123,7 +123,7 @@ load 'lib/helpers'
     # one-off `tui` service, whose command is the container-side start-tui.
     OPENCODE_TEST_HEALTH_FAIL=1 run_launcher_no_host_opencode /dev/null start --verbose --model gpt
     local cbase_no_port="docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CIMG -f <tmp>/compose.rovols.yaml"
-    assert_docker_contains "$cbase_no_port exec -d -w /workspace/project opencode start-serve-backend"
+    assert_docker_contains "$cbase_no_port exec -d -w /workspace/project opencode /entrypoint.sh start-serve-backend"
     assert_docker_contains "$cbase_no_port exec -T -w /workspace/project opencode waitforserver http://127.0.0.1:4096"
     assert_docker_contains "$cbase_no_port run --rm --remove-orphans -e BACKEND_ORIGIN=http://opencode:4096 tui --model gpt"
     assert_launcher_output_contains "Waiting for the opencode backend to launch"
@@ -234,8 +234,8 @@ load 'lib/helpers'
     # exec -T (non-interactive).
     run_launcher /dev/null changes --verbose
     assert_docker_contains "$CBASE ps -q opencode"
-    assert_docker_contains "$CBASE exec -T $CUSER -w /workspace/project opencode git-changes"
-    assert_docker_contains "$CBASE exec -T $CUSER -w /workspace/project opencode opencode run --agent plan --auto"
+    assert_docker_contains "$CBASE exec -T -w /workspace/project opencode /entrypoint.sh git-changes"
+    assert_docker_contains "$CBASE exec -T -w /workspace/project opencode /entrypoint.sh opencode run --agent plan --auto"
     assert_launcher_output_contains "Analyzing changes for project: ws"
 }
 
@@ -260,7 +260,7 @@ load 'lib/helpers'
 
     # The gather composes from the plain args: the io override joins them only
     # afterwards, so no command carrying it may have been the gather.
-    assert_docker_contains "$CBASE exec -T $CUSER -w /workspace/project opencode git-changes"
+    assert_docker_contains "$CBASE exec -T -w /workspace/project opencode /entrypoint.sh git-changes"
     assert_docker_lacks "$CBASE -f <tmp>/docker-compose.io.yml exec"
     # The agent step: the io override plus a one-off oc-changes container
     # running a plain `opencode run` - never the plan agent, which would refuse
@@ -278,7 +278,7 @@ load 'lib/helpers'
     assert_launcher_output_contains "Plan written to: $SD/changes-plan.md"
     assert_launcher_output_contains "Run it with: opencode:bg --target ./ < $SD/changes-plan.md"
     # ... all via the one-off container, never the running container's exec.
-    assert_docker_lacks "exec -T $CUSER -w /workspace/project opencode opencode run"
+    assert_docker_lacks "exec -T -w /workspace/project opencode /entrypoint.sh opencode run"
     assert_rc 0 "$LAUNCH_RC" "changes --output"
 }
 

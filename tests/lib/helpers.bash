@@ -11,7 +11,7 @@
 set -u
 
 # These globals are the library's interface with the suites that load it:
-# CBASE/CPS/CPARENTPS/CMANAGED/CWSPS/CINFO/CUSER hold the expected command
+# CBASE/CPS/CPARENTPS/CMANAGED/CWSPS/CINFO hold the expected command
 # strings,
 # LAUNCH_RC/LAUNCH_OUT/DOCKER_LOG the last run's results, CACHEVOL the cache
 # override dir. They are written here and read by the test files, which this
@@ -116,9 +116,6 @@ make_sandbox() {
     # volume mounts, port. The volume override lives in a mktemp dir and is
     # normalised to <tmp>.
     CBASE="docker compose -p ws -f $SD/compose/docker-compose.yml -f $SD/compose/compose/env/docker-compose.password.yml -f $CIMG -f <tmp>/compose.rovols.yaml -f $SD/compose/compose/sys/docker-compose.port.yml"
-    # Every exec against the running container is pinned to the host user
-    # (the launcher's --user $HOST_UID, defaulting to 1000 in the sandbox).
-    CUSER="--user 1000"
     # Container discovery: the managed label first, then -a, then the scoping
     # label. Shared by every expectation so the flag order is defined once.
     CPS="docker ps -q --filter label=dev.snowdon.opencode.managed=true -a"

@@ -7,10 +7,11 @@ load 'lib/helpers'
 
 @test "exec" {
     # exec calls opencode:exec directly (ensure_up is commented out in the
-    # launcher), which runs docker compose exec --user <uid>.
+    # launcher), which runs docker compose exec through the container's
+    # /entrypoint.sh (it drops to the host uid/gid).
     run_launcher /dev/null exec --verbose sh -c 'echo hi'
     assert_docker "$CPARENTPS
-$CBASE exec $CUSER -it opencode sh -c echo hi"
+$CBASE exec -it opencode /entrypoint.sh sh -c echo hi"
     assert_launcher_output_contains "Executing in opencode project: ws"
 }
 
@@ -19,7 +20,7 @@ $CBASE exec $CUSER -it opencode sh -c echo hi"
     run_launcher /dev/null run --verbose "npm install"
     assert_docker "$CPARENTPS
 $CBASE ps -q opencode
-$CBASE exec -T $CUSER -w /workspace/project opencode npm install"
+$CBASE exec -T -w /workspace/project opencode /entrypoint.sh npm install"
     assert_launcher_output_contains "Running in opencode project: ws"
 }
 
@@ -37,7 +38,7 @@ $CBASE run --rm -w /workspace/project opencode npm install"
     # shell is a convenience alias for 'exec sh ...' in main().
     run_launcher /dev/null shell -c 'echo hi'
     assert_docker "$CPARENTPS
-$CBASE exec $CUSER -it opencode sh -c echo hi"
+$CBASE exec -it opencode /entrypoint.sh sh -c echo hi"
 }
 
 @test "compose" {
