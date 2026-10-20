@@ -24,6 +24,7 @@ RUN addgroup -g $USER_GID $USERNAME \
         /home/$USERNAME/.local/state/opencode \
         /home/$USERNAME/.local/share/opencode \
         /home/$USERNAME/.config/opencode \
+        /home/$USERNAME/.cache/opencode \
         /etc/opencode/skills \
     && chown -R $USER_UID:$USER_GID /home/$USERNAME \
     && chown -R $USER_UID:$USER_GID /etc/opencode
