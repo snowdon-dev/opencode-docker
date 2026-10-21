@@ -127,10 +127,11 @@ running in the order given:
 ### Examples
 
 ```shell
-# a workspace argument overrides the current directory
-opencode /home/other/somerepo
-opencode:exec /home/other/somerepo sh
-opencode:down /home/other/somerepo
+# a --target path overrides the current directory
+opencode --target /home/other/somerepo
+opencode:exec --target /home/other/somerepo sh
+opencode:down --target /home/other/somerepo
+# delete and ls scope by a positional path instead
 opencode:delete "$(pwd)" --all
 opencode:ls --quiet ~/somerepo
 opencode:compose exec -it opencode sh
@@ -477,7 +478,7 @@ worktree stays isolated. Add one and work in it from the parent repository:
 ```sh
 cd ~/repos/myproject
 git worktree add ../myproject-wt worktree-branch
-opencode:up "$(realpath ../myproject-wt)"
+opencode:up --target "$(realpath ../myproject-wt)"
 opencode:git status   # runs in the worktree
 ```
 
@@ -487,8 +488,8 @@ stops — run the command from the worktree you mean, or pass its path
 explicitly:
 
 ```sh
-opencode "$PWD/w1"
-opencode "$PWD/w2"
+opencode --target "$PWD/w1"
+opencode --target "$PWD/w2"
 ```
 
 ### Worktree sync
@@ -510,11 +511,11 @@ mkdir -p "$SD_AGENT_TREE_ROOT"          # once, it is not created for you
 
 cd ~/repos/myproject
 opencode:create --worktree              # the canonical <project>-dev worktree
-opencode:uptree "$PWD"                  # start its container
+opencode:uptree                         # start its container
 
 # or a branch of your own choosing, then start that worktree
 opencode:create --worktree feature/my-branch
-opencode:uptree --branch feature/my-branch "$PWD"
+opencode:uptree --branch feature/my-branch
 ```
 
 Each worktree is its own workspace with its own container, named after the
@@ -524,6 +525,37 @@ Creating is safe to re-run: an existing worktree is reported and left alone —
 `git worktree remove` it first if you want it recreated on another branch.
 `uptree` never creates the worktree itself; when it is missing it prints the
 `git worktree add` line to run.
+
+## Repl
+
+`opencode:repl` (`ocrepl`) opens an interactive bash shell bound to the
+workspace: a normal bash session that starts in the workspace directory with
+the launcher's commands available as bare names, and the workspace context
+resolved once when the shell starts:
+
+```sh
+cd ~/repos/myproject
+opencode:repl
+
+run npm install        # opencode:run npm install
+execute git log        # opencode:execute git log
+start                  # attach a TUI to this workspace
+exit
+```
+
+Every launcher command is reachable by its bare name (`run`, `execute`,
+`start`, `up`, `list`, `git`, ...); everything else behaves like a normal
+shell. The prompt shows the project name, the tasks in flight and the number
+of running sessions. The repl is still in development, so treat it
+accordingly.
+
+### Server lifetime
+
+Outside the repl the backend server belongs to the TUI session: `opencode`
+(`start`) starts it, and closing the TUI stops it again. Inside the repl the
+server is left open instead — start a TUI, close it, and the backend keeps
+running for the next one. It is stopped when the repl shell itself exits, so
+the server lives as long as the repl does.
 
 ## Start extending with custom functions
 

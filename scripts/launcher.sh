@@ -3669,6 +3669,10 @@ function _ws_except() {
     printf '%s\n' "${items[@]}" | grep -vFx "${patterns[@]}"
 }
 
+is_docker_container_id() {
+    [[ "$1" =~ ^[a-f0-9]{1,64}$ ]]
+}
+
 # Force-remove all managed opencode containers: unlike 'stop' this removes
 # them immediately with 'docker rm -f' - for a stuck container or a full clean
 # up. Pass --all to include oneoff (throwaway `compose run`) containers, and to
@@ -3727,10 +3731,10 @@ function opencode:delete() {
     if ((this)); then
         ws_scope="$(_opencode_current_workspace)"
     elif [[ -n "${args[0]:-}" ]]; then
-        if [[ -d "${args[0]}" ]]; then
-            ws_scope="$(realpath "${args[0]}")"
-        else
+        if is_docker_container_id "${args[0]}" && [[ ! -d "${args[0]}" ]]; then
             cid_match=1
+        else
+            ws_scope="$(realpath "${args[0]}")"
         fi
     fi
 
